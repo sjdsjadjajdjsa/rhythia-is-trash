@@ -42,6 +42,14 @@ Notes fly at you out of a 3D space. Move your mouse over them as they reach the 
 | --- | --- |
 | ![The Violet look in the void space](docs/images/violet-void.webp) | ![The Acid look on the grid](docs/images/acid.webp) |
 
+| Music video behind a song | Song list playing the video |
+| --- | --- |
+| ![Playing an .mp4 song with its music video behind the notes](docs/images/video-in-game.webp) | ![The song list with the highlighted song's video playing behind it](docs/images/video-song-list.webp) |
+
+**Live settings preview:** the game plays on autoplay next to the settings and changes as you edit. Hold `B` to see how it looked before.
+
+![Settings with the live preview of the selected song on the right](docs/images/settings-preview.webp)
+
 ## Install
 
 Download the newest version from [Releases](https://github.com/sjdsjadjajdjsa/rhythia-is-trash/releases/latest).
