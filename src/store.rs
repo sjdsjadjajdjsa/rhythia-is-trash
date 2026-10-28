@@ -74,7 +74,7 @@ fn chosen_data_dir() -> Option<PathBuf> {
     writable(&dir).then_some(dir)
 }
 
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg(not(windows))]
 fn appimage_data_dir(xdg_data_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     let base = xdg_data_home
         .filter(|p| p.is_absolute())
@@ -106,6 +106,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn appimage_data_follows_xdg_then_home() {
         let xdg = PathBuf::from("/xdg/data");
