@@ -62,7 +62,7 @@ Download the newest version from [Releases](https://github.com/sjdsjadjajdjsa/rh
 
 Windows will say the publisher is unknown, as the program isn't signed: click "More info", then "Run anyway".
 
-Rather not install? `rhythia-is-trash-x86_64.exe` is the game on its own: put it in its own folder and run it, since it keeps its maps and settings next to itself. `rhythia-is-trash-windows-x86_64.zip` is the same in a ready-made folder.
+Rather not install? `rhythia-is-trash-portable-x86_64.exe` is the game on its own: put it in its own folder and run it, since it keeps its maps and settings next to itself. `rhythia-is-trash-portable-windows-x86_64.zip` is the same in a ready-made folder. Copy the folder anywhere, a USB stick included, and your maps and scores come along.
 
 Your maps, settings and scores are kept next to the program. The AppImage keeps them in `~/.local/share/rhythia-is-trash` (or `$XDG_DATA_HOME/rhythia-is-trash`) instead, so copy your `maps` folder and `.json` files there if you move over from the folder version. On Windows, if that folder can't be written to (for example under Program Files), they go to `%APPDATA%\rhythia-is-trash` instead.
 

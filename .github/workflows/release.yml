@@ -27,8 +27,8 @@ jobs:
           - os: windows-latest
             assets: |
               rhythia-is-trash-setup-x86_64.exe
-              rhythia-is-trash-x86_64.exe
-              rhythia-is-trash-windows-x86_64.zip
+              rhythia-is-trash-portable-x86_64.exe
+              rhythia-is-trash-portable-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     env:
@@ -72,8 +72,8 @@ jobs:
           New-Item -ItemType Directory dist/rhythia-is-trash/maps -Force | Out-Null
           Copy-Item target/release/rhythm.exe, README.md, LICENSE dist/rhythia-is-trash/
           Copy-Item assets/fonts/NOTICE.txt dist/rhythia-is-trash/FONTS-NOTICE.txt
-          Compress-Archive -Path dist/rhythia-is-trash -DestinationPath rhythia-is-trash-windows-x86_64.zip
-          Copy-Item target/release/rhythm.exe rhythia-is-trash-x86_64.exe
+          Compress-Archive -Path dist/rhythia-is-trash -DestinationPath rhythia-is-trash-portable-windows-x86_64.zip
+          Copy-Item target/release/rhythm.exe rhythia-is-trash-portable-x86_64.exe
           $version = $env:TAG.TrimStart("v")
           iscc /Q "/DVersion=$version" "/DSource=$env:GITHUB_WORKSPACE\dist\rhythia-is-trash" packaging\windows\rhythia-is-trash.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
