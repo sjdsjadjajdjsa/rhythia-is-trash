@@ -21,7 +21,7 @@ Notes fly at you out of a 3D space. Move your mouse over them as they reach the 
 
 - **Your maps:** `.sspm` (v1 and v2), `.phxm`, `.rhm`, `.txt`, `.osu` and `.osz`. Drag files or folders onto the window and they're checked and copied in.
 - **Any song:** drop an `.mp3`, `.ogg`, `.wav` or `.flac` and it charts the beats for you.
-- **Music videos behind songs:** drop a music video (`.mp4`, `.webm`, `.mkv`, `.mov`) and it plays behind the notes. osu! maps with a video play it too, also straight from an `.osz`. Videos need [ffmpeg](https://ffmpeg.org) on your PATH; without it the game plays the song and tells you. Quality (540p, 720p, 1080p), frame rate, blur and dim are in settings, and `,` `.` move the video earlier or later per song.
+- **Music videos behind songs:** drop a music video (`.mp4`, `.webm`, `.mkv`, `.mov`) and it plays behind the notes. osu! maps with a video play it too, also straight from an `.osz`. Videos need [ffmpeg](https://ffmpeg.org): on your PATH, or `ffmpeg` and `ffprobe` (`ffmpeg.exe` and `ffprobe.exe` on Windows) put next to the game or the AppImage. Without it the game plays the song and tells you. Quality (540p, 720p, 1080p), frame rate, blur and dim are in settings, and `,` `.` move the video earlier or later per song.
 - **Song preview:** the song list plays a clip of the highlighted song, with its video behind the list.
 - **Live settings preview:** settings show the game running with your changes as you make them. Hold `B` to see how it looked before.
 - **A demo song built in**, so it works the moment you open it.

@@ -29,7 +29,6 @@ pub fn decode(bytes: Vec<u8>) -> Result<StaticSoundData, String> {
 fn via_ffmpeg(bytes: &[u8]) -> Result<StaticSoundData, String> {
     use std::{
         fs,
-        process::Command,
         sync::atomic::{AtomicU32, Ordering},
     };
 
@@ -43,16 +42,12 @@ fn via_ffmpeg(bytes: &[u8]) -> Result<StaticSoundData, String> {
     let result = (|| {
         let (input, output) = (dir.join("in"), dir.join("out.wav"));
         fs::write(&input, bytes).map_err(|e| e.to_string())?;
-        let mut command = Command::new("ffmpeg");
-        #[cfg(windows)]
-        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
-        let mut child = command
+        let mut child = crate::video::command("ffmpeg")
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&input)
             .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
             .arg(&output)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("ffmpeg not available: {e}"))?;
         let started = std::time::Instant::now();

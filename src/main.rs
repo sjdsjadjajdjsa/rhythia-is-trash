@@ -1279,7 +1279,7 @@ async fn main() {
                         listen.update(&select.entries[select.selected], &settings, &offsets, !idle);
                         if settings.song_video && listen.video_missing() && select.error.is_none() {
                             select.notice =
-                                Some("this song has a video, install ffmpeg to see it".into());
+                                Some("this song has a video, add ffmpeg to see it".into());
                         }
                     }
                     let status = (importer.pending > 0).then_some("importing...");

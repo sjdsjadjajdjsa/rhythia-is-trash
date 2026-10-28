@@ -20,8 +20,25 @@ pub fn is_video(path: &Path) -> bool {
         .and_then(|x| x.to_str())
         .is_some_and(|x| EXTS.iter().any(|e| x.eq_ignore_ascii_case(e)))
 }
-fn command(program: &str) -> Command {
-    let mut cmd = Command::new(program);
+/// ffmpeg/ffprobe next to the AppImage or the program win over PATH, so a portable folder
+/// can carry its own copy.
+fn tool(name: &str) -> PathBuf {
+    let beside_appimage = std::env::var_os("APPIMAGE")
+        .and_then(|image| Path::new(&image).parent().map(Path::to_path_buf));
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    tool_in(name, beside_appimage.into_iter().chain(beside_exe))
+}
+fn tool_in(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> PathBuf {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    dirs.into_iter()
+        .map(|dir| dir.join(&file))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+pub fn command(program: &str) -> Command {
+    let mut cmd = Command::new(tool(program));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -591,7 +608,9 @@ fn decode(
     tx: SyncSender<Frame>,
 ) -> Result<(), String> {
     if !tools_present() {
-        return Err("Video requires ffmpeg and ffprobe on PATH (not available)".into());
+        return Err(
+            "Video requires ffmpeg and ffprobe, on PATH or next to the game (not available)".into(),
+        );
     }
     if shared.lock().unwrap().control.stop {
         return Ok(());
@@ -719,6 +738,26 @@ fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_tool_next_to_the_game_wins_over_path() {
+        let root = std::env::temp_dir().join(format!("rhythm-tool-{}", std::process::id()));
+        let (empty, beside) = (root.join("empty"), root.join("beside"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&beside).unwrap();
+        let file = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(tool_in("ffmpeg", [empty.clone()]), PathBuf::from("ffmpeg"));
+        std::fs::write(beside.join(&file), b"").unwrap();
+        assert_eq!(
+            tool_in("ffmpeg", [empty, beside.clone()]),
+            beside.join(&file)
+        );
+        std::fs::create_dir_all(root.join("dir").join(&file)).unwrap();
+        assert_eq!(
+            tool_in("ffmpeg", [root.join("dir")]),
+            PathBuf::from("ffmpeg")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
     #[test]
     fn video_extensions() {
         for name in ["a.MP4", "a.m4v", "a.webm", "a.mkv", "a.mov", "a.AVI"] {
