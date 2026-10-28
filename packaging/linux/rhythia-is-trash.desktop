@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=rhythia is trash
+GenericName=Rhythm game
+Comment=Rhythia-style 3D aim rhythm game
+Exec=rhythm %f
+Icon=rhythia-is-trash
+Terminal=false
+Categories=Game;
+Keywords=rhythm;rhythia;sound space;osu;aim;

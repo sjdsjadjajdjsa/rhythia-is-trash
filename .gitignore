@@ -8,3 +8,5 @@ perf/
 dist/
 __pycache__/
 *.pyc
+*.AppImage
+*.AppImage.zsync

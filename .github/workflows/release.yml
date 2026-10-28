@@ -20,7 +20,10 @@ jobs:
           # any distribution with glibc 2.35 or newer.
           - os: ubuntu-24.04
             container: ubuntu:22.04
-            assets: rhythia-is-trash-linux-x86_64.tar.gz
+            assets: |
+              rhythia-is-trash-linux-x86_64.tar.gz
+              rhythia-is-trash-x86_64.AppImage
+              rhythia-is-trash-x86_64.AppImage.zsync
           - os: windows-latest
             assets: |
               rhythia-is-trash-setup-x86_64.exe
@@ -35,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev libdbus-1-dev
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl file git build-essential pkg-config libasound2-dev libx11-dev libxi-dev libgl1-mesa-dev libdbus-1-dev
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -59,6 +62,9 @@ jobs:
           cp target/release/rhythm README.md LICENSE dist/rhythia-is-trash/
           cp assets/fonts/NOTICE.txt dist/rhythia-is-trash/FONTS-NOTICE.txt
           tar czf rhythia-is-trash-linux-x86_64.tar.gz -C dist rhythia-is-trash
+      - name: AppImage
+        if: runner.os == 'Linux'
+        run: packaging/linux/build-appimage.sh
       - name: Pack (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

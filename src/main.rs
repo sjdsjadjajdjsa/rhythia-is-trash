@@ -970,7 +970,9 @@ async fn main() {
     let mut shown_bypass = false;
     let mut game = match std::env::args_os().nth(1) {
         Some(path) => {
-            match Entry::File(PathBuf::from(path)).load(&settings, &scores, &offsets, None) {
+            match Entry::File(store::from_launch_dir(PathBuf::from(path)))
+                .load(&settings, &scores, &offsets, None)
+            {
                 Ok(g) => Some(g),
                 Err(e) => {
                     select.error = Some(e);
