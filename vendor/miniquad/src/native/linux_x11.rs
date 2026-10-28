@@ -56,6 +56,93 @@ pub struct X11Display {
     drag_n_drop: drag_n_drop::X11DnD,
 }
 
+/// rhythia patch: Xwayland (seen under Hyprland) sends FocusIn but no FocusOut when keyboard
+/// focus moves to a native Wayland window; it parks X input focus on PointerRoot instead. So the
+/// loops also poll XGetInputFocus a few times a second (unless window::set_focus_poll(false)).
+#[derive(Default)]
+struct FocusPoll {
+    at: Option<std::time::Instant>,
+}
+
+impl FocusPoll {
+    /// The focus to publish at `now`, if a poll is due; `query` returns the X input focus.
+    fn poll(
+        &mut self,
+        now: std::time::Instant,
+        enabled: bool,
+        own: Window,
+        query: impl FnOnce() -> Window,
+    ) -> Option<bool> {
+        if !enabled {
+            self.at = None;
+            return None;
+        }
+        if self
+            .at
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(250))
+        {
+            return None;
+        }
+        self.at = Some(now);
+        // Published on every poll, not only on change: FocusIn sets focused on its own, and
+        // Xwayland may never send the matching FocusOut.
+        Some(query() == own)
+    }
+
+    unsafe fn update(&mut self, display: &X11Display) {
+        let enabled = crate::focus_poll_enabled();
+        let published = self.poll(std::time::Instant::now(), enabled, display.window, || {
+            let mut focus: Window = 0;
+            let mut revert: libc::c_int = 0;
+            (display.libx11.XGetInputFocus)(display.display, &mut focus, &mut revert);
+            focus
+        });
+        if let Some(focused) = published {
+            crate::set_focused(focused);
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_poll_tests {
+    use super::FocusPoll;
+    use std::time::{Duration, Instant};
+
+    const OWN: super::Window = 7;
+    const OTHER: super::Window = 1; // PointerRoot under Xwayland
+
+    #[test]
+    fn every_due_poll_publishes_the_current_focus() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut p = FocusPoll::default();
+        assert_eq!(p.poll(at(0), true, OWN, || OTHER), Some(false));
+        // FocusIn sets focused = true, then focus leaves again (no FocusOut) before the next
+        // poll: the poll still sees OTHER and must publish false again.
+        assert_eq!(p.poll(at(300), true, OWN, || OTHER), Some(false));
+        assert_eq!(p.poll(at(600), true, OWN, || OWN), Some(true));
+        assert_eq!(p.poll(at(900), true, OWN, || OWN), Some(true));
+    }
+
+    #[test]
+    fn polls_are_throttled_and_can_be_switched_off() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut p = FocusPoll::default();
+        assert_eq!(p.poll(at(0), true, OWN, || OWN), Some(true));
+        assert_eq!(
+            p.poll(at(100), true, OWN, || panic!("queried within 250 ms")),
+            None
+        );
+        assert_eq!(
+            p.poll(at(400), false, OWN, || panic!("queried while off")),
+            None
+        );
+        // Switched back on: polls at once.
+        assert_eq!(p.poll(at(410), true, OWN, || OTHER), Some(false));
+    }
+}
+
 impl X11Display {
     unsafe fn process_event(&mut self, event: &mut XEvent, event_handler: &mut dyn EventHandler) {
         match event.type_0 {
@@ -144,10 +231,18 @@ impl X11Display {
             8 => {
                 event_handler.mouse_leave_event();
             }
+            // FocusIn / FocusOut. rhythia patch: also tracked for window::is_focused. Keyboard
+            // grabs (mode NotifyGrab = 1 / NotifyUngrab = 2, e.g. a global shortcut) are not a focus change.
             9 => {
+                if event.xfocus.mode != 1 && event.xfocus.mode != 2 {
+                    crate::set_focused(true);
+                }
                 event_handler.window_restored_event();
             }
             10 => {
+                if event.xfocus.mode != 1 && event.xfocus.mode != 2 {
+                    crate::set_focused(false);
+                }
                 event_handler.window_minimized_event();
             }
             22 => {
@@ -513,6 +608,7 @@ where
     }
 
     let mut event_handler = (f.take().unwrap())();
+    let mut focus_poll = FocusPoll::default();
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
         let delay = crate::FRAME_DELAY_US.load(std::sync::atomic::Ordering::Relaxed);
@@ -522,6 +618,10 @@ where
         while let Ok(request) = rx.try_recv() {
             display.process_request(request);
         }
+        if let Some(interval) = crate::take_swap_interval() {
+            glx.swap_interval(display.display, glx_window, glx_context, interval);
+        }
+        focus_poll.update(&display);
         glx.make_current(display.display, glx_window, glx_context);
 
         let mut count = (display.libx11.XPending)(display.display);
@@ -629,6 +729,7 @@ where
     (display.libx11.XFlush)(display.display);
 
     let mut event_handler = (f.take().unwrap())();
+    let mut focus_poll = FocusPoll::default();
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
         let delay = crate::FRAME_DELAY_US.load(std::sync::atomic::Ordering::Relaxed);
@@ -638,6 +739,12 @@ where
         while let Ok(request) = rx.try_recv() {
             display.process_request(request);
         }
+        if let Some(interval) = crate::take_swap_interval() {
+            if (egl_lib.eglSwapInterval)(egl_display, interval) == 0 {
+                eprintln!("eglSwapInterval failed");
+            }
+        }
+        focus_poll.update(&display);
 
         let mut count = (display.libx11.XPending)(display.display);
         let block_on_wait = conf.platform.blocking_event_loop && !display.update_requested;

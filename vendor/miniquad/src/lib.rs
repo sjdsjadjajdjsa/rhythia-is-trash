@@ -92,6 +92,31 @@ use std::sync::{Mutex, OnceLock};
 
 static NATIVE_DISPLAY: OnceLock<Mutex<native::NativeDisplayData>> = OnceLock::new();
 static FRAME_DELAY_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// rhythia patch: swap interval change requested at runtime (-1 = none pending), applied by the
+// X11 (GLX and EGL) and Windows (WGL) loops at the top of the next frame.
+static SWAP_INTERVAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+// rhythia patch: keyboard focus, set from X11 FocusIn/FocusOut and Windows
+// WM_ACTIVATE/WM_SETFOCUS/WM_KILLFOCUS. Starts true so backends without the events never look unfocused.
+static WINDOW_FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+// rhythia patch: whether the X11 loops poll XGetInputFocus (see window::set_focus_poll).
+static FOCUS_POLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[allow(dead_code)]
+fn set_focused(focused: bool) {
+    WINDOW_FOCUSED.store(focused, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[allow(dead_code)]
+fn focus_poll_enabled() -> bool {
+    FOCUS_POLL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Takes a pending swap interval request, if any (rhythia patch).
+#[allow(dead_code)]
+fn take_swap_interval() -> Option<i32> {
+    let v = SWAP_INTERVAL.swap(-1, std::sync::atomic::Ordering::Relaxed);
+    (v >= 0).then_some(v)
+}
 
 fn set_display(display: native::NativeDisplayData) {
     NATIVE_DISPLAY
@@ -121,6 +146,25 @@ pub mod window {
     pub fn set_frame_delay(seconds: f64) {
         let micros = (seconds.max(0.0) * 1_000_000.0) as u32;
         crate::FRAME_DELAY_US.store(micros, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Changes the swap interval at runtime (0 = no vsync, 1 = vsync). Honoured on X11 (GLX
+    /// and EGL) and Windows (WGL, needs WGL_EXT_swap_control); a no-op elsewhere. rhythia patch.
+    pub fn set_swap_interval(interval: i32) {
+        crate::SWAP_INTERVAL.store(interval.max(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the window has keyboard focus. Always true on backends that do not report
+    /// focus (only X11 and Windows do). rhythia patch.
+    pub fn is_focused() -> bool {
+        crate::WINDOW_FOCUSED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turns the X11 focus poll (a synchronous XGetInputFocus round trip every 250 ms, for
+    /// Xwayland's missing FocusOut) on or off; FocusIn/FocusOut events still apply while off.
+    /// On by default; a no-op on other backends. rhythia patch.
+    pub fn set_focus_poll(enabled: bool) {
+        crate::FOCUS_POLL.store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     use super::*;

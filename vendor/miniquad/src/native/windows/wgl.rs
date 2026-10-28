@@ -459,11 +459,19 @@ impl Wgl {
             }
         }
         (display.libopengl32.wglMakeCurrent)(display.dc, gl_ctx);
-        if self.ext_swap_control {
-            /* FIXME: DwmIsCompositionEnabled() (see GLFW) */
-            (self.SwapIntervalEXT.unwrap())(swap_interval);
-        }
+        self.set_swap_interval(swap_interval);
 
         gl_ctx
+    }
+
+    /// Needs the context current (it is, on the loop thread). rhythia patch: also called at
+    /// runtime for window::set_swap_interval.
+    pub unsafe fn set_swap_interval(&self, swap_interval: i32) {
+        if self.ext_swap_control {
+            /* FIXME: DwmIsCompositionEnabled() (see GLFW) */
+            if let Some(swap_interval_ext) = self.SwapIntervalEXT {
+                swap_interval_ext(swap_interval);
+            }
+        }
     }
 }

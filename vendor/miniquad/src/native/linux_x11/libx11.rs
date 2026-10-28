@@ -799,7 +799,7 @@ pub mod Xresource_h {
         pub size: libc::c_uint,
         pub addr: XPointer,
     }
-    use super::Xlib_h::{XPointer, _XrmHashBucketRec};
+    use super::Xlib_h::{_XrmHashBucketRec, XPointer};
 }
 
 #[derive(Copy, Clone)]
@@ -914,6 +914,7 @@ crate::declare_module!(
     pub fn XDestroyWindow(*mut Display, Window) -> c_int,
     pub fn XFreeColormap(*mut Display, Colormap) -> c_int,
     pub fn XFlush(*mut Display) -> c_int,
+    pub fn XGetInputFocus(*mut Display, *mut Window, *mut c_int) -> c_int,
     pub fn XCloseDisplay(*mut Display) -> c_int,
     pub fn XGrabPointer(*mut Display, Window, c_int, c_uint, c_int, c_int, Window, Cursor, Time) -> c_int,
     pub fn XUngrabPointer(*mut Display, Time) -> c_int,
