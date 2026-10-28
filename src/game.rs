@@ -183,6 +183,11 @@ pub struct Game {
     pub recorded: bool,
     pub autoplay: bool,
     pub load_ms: [f32; 3],
+    /// Per-song music video offset (ms, positive = video later), shown on the HUD after `,` / `.`.
+    pub video_offset_ms: f64,
+    /// `,` / `.` presses main has not saved yet (one press = `offsets::STEP_MS`).
+    pub video_steps: i32,
+    pub video_offset_at: f64,
     last_mouse: Option<Vec2>,
     last_tick: f64,
 }
@@ -298,6 +303,9 @@ impl Game {
             recorded: false,
             autoplay: false,
             load_ms: [0.0; 3],
+            video_offset_ms: 0.0,
+            video_steps: 0,
+            video_offset_at: f64::NEG_INFINITY,
             last_mouse: None,
             last_tick: get_time(),
             settings,
@@ -406,6 +414,14 @@ impl Game {
         if is_key_pressed(KeyCode::Equal) {
             self.sensitivity += 0.05;
         }
+        if self.map.video.is_some() && crate::wallpaper::has_song_video() {
+            let steps = i32::from(is_key_pressed(KeyCode::Period))
+                - i32::from(is_key_pressed(KeyCode::Comma));
+            if steps != 0 {
+                self.video_steps += steps;
+                self.video_offset_at = get_time();
+            }
+        }
         let click = is_mouse_button_pressed(MouseButton::Left);
         match self.phase {
             Phase::Ready | Phase::Finished => {
@@ -459,6 +475,38 @@ impl Game {
     pub fn autostart(&mut self) {
         self.autoplay = true;
         self.start(false);
+    }
+
+    pub fn preview(&mut self, settings: &Settings, window: (f64, f64)) {
+        self.settings = settings.clone();
+        self.space = settings.space;
+        self.offset = f64::from(settings.offset_ms) / 1000.0;
+        self.palette = crate::look::active_palette();
+        self.autoplay = true;
+        let t = get_time();
+        let dt = t - self.last_tick;
+        self.last_tick = t;
+        if self.phase != Phase::Playing || self.run.failed || self.now() > window.1 {
+            self.run = Run::new(
+                self.map.notes.len(),
+                *self.palette.last().expect("palette is not empty"),
+            );
+            let skipped = self.map.notes.partition_point(|n| n.time < window.0);
+            self.run.states[..skipped].fill(NoteState::Hit);
+            self.run.first = skipped;
+            self.run.started_at = window.0;
+            self.music.restart(window.0);
+            self.phase = Phase::Playing;
+            self.phase_since = t;
+        }
+        self.music.update(dt);
+        self.aim();
+        self.judge();
+        self.animate_hud(dt as f32);
+        let now = self.now();
+        self.run
+            .effects
+            .retain(|e| now - e.born < BREAK_LIFE.max(POPUP_LIFE));
     }
 
     fn start(&mut self, retry: bool) {

@@ -43,7 +43,10 @@ fn via_ffmpeg(bytes: &[u8]) -> Result<StaticSoundData, String> {
     let result = (|| {
         let (input, output) = (dir.join("in"), dir.join("out.wav"));
         fs::write(&input, bytes).map_err(|e| e.to_string())?;
-        let mut child = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+        let mut child = command
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&input)
             .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
@@ -247,6 +250,31 @@ impl Music {
                 h.resume(Tween::default());
             }
         }
+    }
+
+    pub fn set_music_volume(&mut self, volume: f32) {
+        let music = Decibels(db(volume));
+        if let Some(t) = self.track.take() {
+            self.track = Some(t.volume(music));
+        }
+        if let Some(h) = &mut self.handle {
+            h.set_volume(music, Tween::default());
+        }
+    }
+
+    pub fn set_volumes(&mut self, music_volume: f32, sfx_volume: f32) {
+        self.set_music_volume(music_volume);
+        let sfx = |s: Vec<f32>| {
+            from_mono(&s, sfx::SAMPLE_RATE).volume(Decibels(SFX_VOLUME_DB + db(sfx_volume)))
+        };
+        self.hit = sfx(sfx::hit());
+        self.miss = sfx(sfx::miss());
+        self.cues = [
+            sfx(sfx::confirm()),
+            sfx(sfx::clear()),
+            sfx(sfx::fail()),
+            sfx(sfx::level_up()),
+        ];
     }
 
     pub fn clock_stats(&self) -> ClockStats {

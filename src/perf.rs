@@ -278,11 +278,169 @@ impl Pacer {
     }
 }
 
+/// What a frame-rate setting asks of the loop. Every cap is a sleep before input is read
+/// (miniquad::window::set_frame_delay), so a capped frame still samples input as late as it can.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Cap {
+    /// No vsync, no sleep.
+    Unlimited,
+    /// Vsync paces the loop; while playing, the low-latency Pacer adds its own sleep.
+    Vsync,
+    /// Sleep-limited to this rate.
+    Fps(f32),
+    /// A fixed sleep in ms (the old menu behaviour: 11.5 ms, about 72 fps on a 144 Hz screen).
+    Delay(f32),
+}
+
+impl Cap {
+    pub fn label(self) -> String {
+        match self {
+            Cap::Unlimited => "unlimited".into(),
+            Cap::Vsync => "vsync".into(),
+            Cap::Fps(f) => format!("{f:.0}"),
+            Cap::Delay(ms) => format!("{ms} ms sleep"),
+        }
+    }
+}
+
+/// The fps counter: frames counted over half-second windows, so it follows a cap change
+/// (or the 15 fps background rate) within a second whatever the frame rate.
+#[derive(Default)]
+pub struct FpsMeter {
+    window_s: f64,
+    frames: u32,
+    fps: f32,
+}
+
+impl FpsMeter {
+    const WINDOW_S: f64 = 0.5;
+
+    /// One frame of `frame_ms`; returns the latest whole-window rate.
+    pub fn tick(&mut self, frame_ms: f32) -> f32 {
+        self.window_s += f64::from(frame_ms) / 1000.0;
+        self.frames += 1;
+        if self.window_s >= Self::WINDOW_S {
+            self.fps = (f64::from(self.frames) / self.window_s) as f32;
+            self.window_s = 0.0;
+            self.frames = 0;
+        }
+        self.fps
+    }
+}
+
+/// How hard one frame's error moves the limiter's sleep (integral control; the sleep set
+/// now lands in the next frame, so anything near 1 would ring).
+const LIMIT_GAIN: f32 = 0.3;
+/// With vsync on, aim a little under the period: a cap equal to the refresh rate would
+/// otherwise keep pushing the sleep into a missed refresh.
+const VSYNC_SLACK: f32 = 0.98;
+
+/// Turns a `Cap` into this frame's sleep before input.
+#[derive(Default)]
+pub struct Limiter {
+    delay_ms: f32,
+}
+
+impl Limiter {
+    /// `frame_ms`: the last full frame (it includes the previous sleep). `pacer_ms`: the
+    /// low-latency Pacer's sleep, used as is under vsync.
+    pub fn delay_ms(&mut self, cap: Cap, frame_ms: f32, vsync: bool, pacer_ms: f32) -> f32 {
+        match cap {
+            Cap::Unlimited => {
+                self.delay_ms = 0.0;
+                0.0
+            }
+            Cap::Vsync => {
+                self.delay_ms = 0.0;
+                pacer_ms
+            }
+            Cap::Delay(ms) => {
+                self.delay_ms = 0.0;
+                ms.max(0.0)
+            }
+            Cap::Fps(fps) => {
+                let period = 1000.0 / fps.max(1.0);
+                let target = if vsync { period * VSYNC_SLACK } else { period };
+                // A hitch (loading, a dragged window) must not wipe the sleep out for seconds.
+                let frame = frame_ms.clamp(0.0, period * 2.0);
+                self.delay_ms = (self.delay_ms + LIMIT_GAIN * (target - frame)).clamp(0.0, period);
+                self.delay_ms
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const INTERVAL: f32 = 6.94;
+
+    /// Runs the limiter against a loop whose frame = work + sleep (+ vsync rounding).
+    fn settle(cap: Cap, work_ms: f32, refresh_ms: Option<f32>) -> (f32, f32) {
+        let mut l = Limiter::default();
+        let (mut delay, mut sum) = (0.0, 0.0);
+        let frames = 2000;
+        for i in 0..frames {
+            let raw = work_ms + delay;
+            let frame = refresh_ms.map_or(raw, |r| (raw / r).ceil().max(1.0) * r);
+            if i >= frames - 500 {
+                sum += frame;
+            }
+            delay = l.delay_ms(cap, frame, refresh_ms.is_some(), 1.25);
+        }
+        (delay, sum / 500.0)
+    }
+
+    #[test]
+    fn caps_map_to_the_right_sleep() {
+        for fps in [60.0, 120.0, 144.0, 240.0, 360.0] {
+            let (delay, avg) = settle(Cap::Fps(fps), 1.5, None);
+            let period = 1000.0 / fps;
+            assert!((avg - period).abs() < 0.05, "{fps}: frame {avg}");
+            assert!(
+                (delay - (period - 1.5)).abs() < 0.05,
+                "{fps}: delay {delay}"
+            );
+        }
+        // work slower than the cap: never sleeps
+        assert_eq!(settle(Cap::Fps(360.0), 4.0, None).0, 0.0);
+        // vsync at 144 Hz with a 60 cap: averages near (a little over) 60
+        let (_, avg) = settle(Cap::Fps(60.0), 1.5, Some(INTERVAL));
+        assert!(avg > 15.9 && avg < 16.8, "{avg}");
+        // a cap at the refresh rate under vsync settles at zero sleep, no missed refreshes
+        let (delay, avg) = settle(Cap::Fps(144.0), 1.5, Some(INTERVAL));
+        assert!(
+            delay < 0.5 && (avg - INTERVAL).abs() < 1e-3,
+            "{delay} {avg}"
+        );
+        let mut l = Limiter::default();
+        assert_eq!(l.delay_ms(Cap::Unlimited, 1.0, false, 3.0), 0.0);
+        assert_eq!(l.delay_ms(Cap::Vsync, 6.9, true, 3.0), 3.0);
+        assert_eq!(l.delay_ms(Cap::Delay(11.5), 13.9, true, 3.0), 11.5);
+        // menus at 15 fps when unfocused
+        let (delay, _) = settle(Cap::Fps(15.0), 2.0, None);
+        assert!((delay - (1000.0 / 15.0 - 2.0)).abs() < 0.1);
+        // a hitch moves the sleep by at most one period's worth of error
+        let mut l = Limiter::default();
+        let before = (0..400).fold(0.0, |d, _| l.delay_ms(Cap::Fps(60.0), 1.5 + d, false, 0.0));
+        let after = l.delay_ms(Cap::Fps(60.0), 500.0, false, 0.0);
+        assert!(before - after < 1000.0 / 60.0 * LIMIT_GAIN + 1e-3);
+    }
+
+    #[test]
+    fn fps_meter_follows_a_rate_change_within_a_second() {
+        let mut m = FpsMeter::default();
+        let mut fps = 0.0;
+        for _ in 0..300 {
+            fps = m.tick(1000.0 / 144.0);
+        }
+        assert!((fps - 144.0).abs() < 1.0, "{fps}");
+        for _ in 0..15 {
+            fps = m.tick(1000.0 / 15.0);
+        }
+        assert!((fps - 15.0).abs() < 0.5, "{fps}");
+    }
 
     fn run(p: &mut Pacer, frames: u32, frame_ms: f32) {
         for _ in 0..frames {

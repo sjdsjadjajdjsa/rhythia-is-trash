@@ -8,8 +8,10 @@ mod game;
 mod import;
 mod look;
 mod map;
+mod offsets;
 mod perf;
 mod postfx;
+mod preview;
 mod priority;
 mod render;
 #[cfg(test)]
@@ -20,6 +22,7 @@ mod sfx;
 mod skin;
 mod stats;
 mod store;
+mod video;
 mod wallpaper;
 
 use std::{
@@ -28,6 +31,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
+use kira::sound::static_sound::StaticSoundData;
 use macroquad::prelude::*;
 
 use crate::{
@@ -35,7 +39,8 @@ use crate::{
     calibrate::Calibration,
     game::{Action, Game},
     map::{Map, Meta},
-    perf::{Pacer, Perf},
+    offsets::VideoOffsets,
+    perf::{Cap, FpsMeter, Limiter, Pacer, Perf},
     render::{Style, Text},
     scores::{Best, Scores},
     settings::{Exit, Settings, SettingsScreen},
@@ -44,8 +49,13 @@ use crate::{
 
 const MAPS_DIR: &str = "maps";
 const ROW_H: f32 = 44.0;
-/// Menus sleep this long before reading input, which drops them from the full refresh rate to about half of it (72 fps on a 144 Hz screen). Songs and calibration never use it.
-const MENU_FRAME_DELAY: f64 = 0.0115;
+/// Frame rate of every screen but a running song while the window is in the background.
+const UNFOCUSED_FPS: f32 = 15.0;
+
+/// RHYTHM_VSYNC=0 / =1 forces vsync off / on whatever the frame-rate setting says.
+fn vsync_override() -> Option<bool> {
+    std::env::var_os("RHYTHM_VSYNC").map(|v| v != "0")
+}
 
 type Stamp = Option<std::time::SystemTime>;
 type MetaCache = HashMap<PathBuf, (Stamp, Option<Meta>)>;
@@ -176,40 +186,82 @@ fn window_conf() -> Conf {
         fullscreen: saved.fullscreen,
         window_resizable: true,
         platform: macroquad::miniquad::conf::Platform {
-            swap_interval: std::env::var_os("RHYTHM_VSYNC")
-                .is_some_and(|v| v == "0")
-                .then_some(0),
+            // None keeps the platform default (vsync on), as before the frame-rate setting.
+            swap_interval: (!vsync_override().unwrap_or(saved.vsync())).then_some(0),
             ..Default::default()
         },
         ..Default::default()
     }
 }
 
+/// The fps counter: measured rate and the cap in force, top right on every screen.
+fn draw_fps(skin: &Skin, fps: f32, cap: Cap, vsync: bool) {
+    let text = Text::screen(skin);
+    let cap = match cap {
+        Cap::Vsync if !vsync => "unlimited".to_string(),
+        c => c.label(),
+    };
+    let label = format!("{fps:.0} fps / {cap}");
+    let size = 13.0;
+    let w = text.width(&label, size) + 14.0;
+    let x = text.screen.x - 8.0;
+    draw_rectangle(x - w, 6.0, w, 20.0, Color::new(0.0, 0.0, 0.0, 0.55));
+    text.draw(
+        &label,
+        vec2(x - 7.0, 16.0),
+        Style {
+            align: render::Align::Right,
+            ..Style::new(size, Color::new(1.0, 1.0, 1.0, 0.85))
+        }
+        .middle(),
+    );
+}
+
 fn palette() -> Vec<Color> {
     look::active_palette()
 }
 
+enum Job {
+    Songs(Vec<PathBuf>),
+    /// A video wallpaper (Shift+drop): only a copy, but it can be gigabytes.
+    Wallpaper(PathBuf),
+}
+
+enum Done {
+    Songs(import::Report),
+    Wallpaper(Result<String, String>),
+}
+
 /// Imports run on their own thread so dropping many files one after another never freezes the window.
 struct Importer {
-    jobs: std::sync::mpsc::Sender<Vec<PathBuf>>,
-    done: std::sync::mpsc::Receiver<import::Report>,
+    jobs: std::sync::mpsc::Sender<Job>,
+    done: std::sync::mpsc::Receiver<Done>,
     pending: usize,
 }
 
 impl Importer {
     fn new() -> Self {
-        let (jobs, queue) = std::sync::mpsc::channel::<Vec<PathBuf>>();
+        let (jobs, queue) = std::sync::mpsc::channel::<Job>();
         let (finished, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for paths in queue {
-                let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    import::import(Path::new(MAPS_DIR), &paths)
-                }))
-                .unwrap_or_else(|_| import::Report {
-                    errors: vec!["import failed unexpectedly, the file may be damaged".into()],
-                    ..Default::default()
-                });
-                if finished.send(report).is_err() {
+            for job in queue {
+                let unexpected = "import failed unexpectedly, the file may be damaged";
+                let result = match job {
+                    Job::Songs(paths) => Done::Songs(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            import::import(Path::new(MAPS_DIR), &paths)
+                        }))
+                        .unwrap_or_else(|_| import::Report {
+                            errors: vec![unexpected.into()],
+                            ..Default::default()
+                        }),
+                    ),
+                    Job::Wallpaper(path) => Done::Wallpaper(
+                        std::panic::catch_unwind(|| wallpaper::import(&path))
+                            .unwrap_or_else(|_| Err(unexpected.into())),
+                    ),
+                };
+                if finished.send(result).is_err() {
                     break;
                 }
             }
@@ -221,20 +273,20 @@ impl Importer {
         }
     }
 
-    fn submit(&mut self, paths: Vec<PathBuf>) {
-        if self.jobs.send(paths).is_ok() {
+    fn submit(&mut self, job: Job) {
+        if self.jobs.send(job).is_ok() {
             self.pending += 1;
         }
     }
 
-    fn poll(&mut self) -> Vec<import::Report> {
-        let reports: Vec<import::Report> = self.done.try_iter().collect();
-        self.pending = self.pending.saturating_sub(reports.len());
-        reports
+    fn poll(&mut self) -> Vec<Done> {
+        let done: Vec<Done> = self.done.try_iter().collect();
+        self.pending = self.pending.saturating_sub(done.len());
+        done
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Entry {
     Demo,
     File(PathBuf),
@@ -250,16 +302,37 @@ impl Entry {
         }
     }
 
-    fn load(&self, settings: &Settings, scores: &Scores) -> Result<Game, String> {
+    fn read(&self) -> Result<Song, String> {
+        match self {
+            Entry::Demo => {
+                let d = demo::build();
+                Ok((d.map, Some(audio::from_mono(&d.samples, demo::SAMPLE_RATE))))
+            }
+            Entry::File(path) => {
+                let mut map = Map::load(path)?;
+                let track = map.audio.take().map(audio::decode).transpose()?;
+                Ok((map, track))
+            }
+        }
+    }
+
+    fn load(
+        &self,
+        settings: &Settings,
+        scores: &Scores,
+        offsets: &VideoOffsets,
+        ready: Option<Song>,
+    ) -> Result<Game, String> {
         let started = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         let mut parse_ms = 0.0;
-        let (map, track) = match self {
-            Entry::Demo => {
+        let (map, track) = match (ready, self) {
+            (Some(song), _) => song,
+            (None, Entry::Demo) => {
                 let d = demo::build();
                 (d.map, Some(audio::from_mono(&d.samples, demo::SAMPLE_RATE)))
             }
-            Entry::File(path) => {
+            (None, Entry::File(path)) => {
                 let mut map = Map::load(path)?;
                 parse_ms = ms(started);
                 let track = map.audio.take().map(audio::decode).transpose()?;
@@ -280,7 +353,253 @@ impl Entry {
         game.key = self.label();
         game.best = scores.best(&game.key);
         game.load_ms = [parse_ms, decode_ms, ms(started) - parse_ms - decode_ms];
+        let clip = game.map.video.as_ref().filter(|_| settings.song_video);
+        wallpaper::set_song_video(clip);
+        if clip.is_some() {
+            game.video_offset_ms = offsets.get(&game.key);
+            wallpaper::set_song_video_nudge(game.video_offset_ms / 1000.0);
+        }
         Ok(game)
+    }
+}
+
+type Song = (Map, Option<StaticSoundData>);
+
+const LISTEN_DELAY: f64 = 0.3;
+const LISTEN_FADE: f64 = 0.8;
+const LISTEN_LENGTH: f64 = 24.0;
+const LISTEN_VOLUME: f32 = 0.7;
+
+/// Where the song-select clip starts and how long it loops: from ~40 % in, at most
+/// `LISTEN_LENGTH`, never past the end of a short track.
+fn listen_window(length: f64) -> (f64, f64) {
+    let length = if length.is_finite() {
+        length.max(0.0)
+    } else {
+        0.0
+    };
+    let from = (length * 0.4).min(length - LISTEN_LENGTH).max(0.0);
+    (from, (length - from).clamp(1.0, LISTEN_LENGTH))
+}
+
+/// Volume envelope of the clip `t` seconds into a loop of `span` seconds.
+fn listen_fade(t: f64, span: f64) -> f32 {
+    (t / LISTEN_FADE)
+        .min((span - t) / LISTEN_FADE)
+        .clamp(0.0, 1.0) as f32
+}
+
+/// Request bookkeeping for the song-select loader. Each selection gets a new generation;
+/// results of older generations are dropped, and an entry that failed to load is not asked
+/// for again until the selection moves to another entry.
+struct Loads<E> {
+    generation: u64,
+    asked: Option<E>,
+    failed: Option<E>,
+}
+
+impl<E> Default for Loads<E> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            asked: None,
+            failed: None,
+        }
+    }
+}
+
+impl<E: Clone + PartialEq> Loads<E> {
+    /// The highlighted entry changed.
+    fn select(&mut self, entry: &E) {
+        self.cancel();
+        if self.failed.as_ref() != Some(entry) {
+            self.failed = None;
+        }
+    }
+
+    /// Whatever is in flight is no longer wanted.
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.asked = None;
+    }
+
+    /// The request to send for `entry`, unless it is already asked for or failed.
+    fn ask(&mut self, entry: &E) -> Option<(u64, E)> {
+        if self.asked.as_ref() == Some(entry) || self.failed.as_ref() == Some(entry) {
+            return None;
+        }
+        self.asked = Some(entry.clone());
+        Some((self.generation, entry.clone()))
+    }
+
+    /// A finished load; Some when it answers the current request.
+    fn finish<T>(&mut self, generation: u64, result: Result<T, String>) -> Option<T> {
+        if generation != self.generation {
+            return None;
+        }
+        let entry = self.asked.take()?;
+        result
+            .inspect_err(|e| {
+                eprintln!("song preview: {e}");
+                self.failed = Some(entry);
+            })
+            .ok()
+    }
+}
+
+type Loader<J, R> = (
+    std::sync::mpsc::Sender<(u64, J)>,
+    std::sync::mpsc::Receiver<(u64, R)>,
+);
+
+/// One worker thread for `work`: jobs queued while it is busy collapse to the newest, so
+/// scrolling through the list decodes at most the song in hand plus the last one asked for.
+fn spawn_loader<J: Send + 'static, R: Send + 'static>(
+    work: impl Fn(J) -> R + Send + 'static,
+) -> Loader<J, R> {
+    let (jobs, queue) = std::sync::mpsc::channel::<(u64, J)>();
+    let (done, results) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(first) = queue.recv() {
+            let (generation, job) = queue.try_iter().last().unwrap_or(first);
+            if done.send((generation, work(job))).is_err() {
+                break;
+            }
+        }
+    });
+    (jobs, results)
+}
+
+fn read_entry(entry: Entry) -> Result<Song, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry.read()))
+        .unwrap_or_else(|_| Err("could not read this song".into()))
+}
+
+/// Plays a looping clip of the highlighted song (and its video) in song select, loading it off the main thread.
+struct Listen {
+    wanted: Option<Entry>,
+    since: f64,
+    loads: Loads<Entry>,
+    jobs: std::sync::mpsc::Sender<(u64, Entry)>,
+    results: std::sync::mpsc::Receiver<(u64, Result<Song, String>)>,
+    song: Option<(Entry, Song)>,
+    music: Option<Music>,
+    from: f64,
+    span: f64,
+    last: f64,
+    paused: bool,
+}
+
+impl Listen {
+    fn new() -> Self {
+        let (jobs, results) = spawn_loader(read_entry);
+        Self {
+            wanted: None,
+            since: 0.0,
+            loads: Loads::default(),
+            jobs,
+            results,
+            song: None,
+            music: None,
+            from: 0.0,
+            span: LISTEN_LENGTH,
+            last: get_time(),
+            paused: false,
+        }
+    }
+
+    fn stop(&mut self) {
+        self.music = None;
+        self.song = None;
+        self.wanted = None;
+        self.loads.cancel();
+        wallpaper::set_song_video(None);
+    }
+
+    fn video_missing(&self) -> bool {
+        self.song
+            .as_ref()
+            .is_some_and(|(_, (map, _))| map.video.is_some())
+            && video::available() == Some(false)
+    }
+
+    fn take(&mut self, entry: &Entry) -> Option<Song> {
+        let song = self.song.take().filter(|(e, _)| e == entry).map(|(_, s)| s);
+        self.stop();
+        song
+    }
+
+    /// Pauses the clip and its video (the window lost focus).
+    fn set_paused(&mut self, paused: bool) {
+        if paused != self.paused {
+            self.paused = paused;
+            if let Some(music) = &mut self.music {
+                music.set_paused(paused);
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        entry: &Entry,
+        settings: &Settings,
+        offsets: &VideoOffsets,
+        focused: bool,
+    ) {
+        let now = get_time();
+        let dt = now - self.last;
+        self.last = now;
+        if self.wanted.as_ref() != Some(entry) {
+            self.stop();
+            self.loads.select(entry);
+            self.wanted = Some(entry.clone());
+            self.since = now;
+        }
+        self.set_paused(!focused);
+        while let Ok((generation, result)) = self.results.try_recv() {
+            if let Some(song) = self.loads.finish(generation, result) {
+                self.start(entry.clone(), song, settings, offsets);
+            }
+        }
+        if self.song.is_none()
+            && now - self.since > LISTEN_DELAY
+            && let Some(job) = self.loads.ask(entry)
+        {
+            let _ = self.jobs.send(job);
+        }
+        let Some(music) = &mut self.music else {
+            return;
+        };
+        music.update(dt);
+        let t = music.time() - self.from;
+        if t > self.span {
+            music.restart(self.from);
+        }
+        let fade = listen_fade(t, self.span);
+        music.set_music_volume(settings.music_volume * LISTEN_VOLUME * fade * fade);
+        wallpaper::song_video_time(music.time());
+    }
+
+    fn start(&mut self, entry: Entry, song: Song, settings: &Settings, offsets: &VideoOffsets) {
+        let length = song
+            .1
+            .as_ref()
+            .map_or(song.0.end_time(), |t| t.duration().as_secs_f64());
+        (self.from, self.span) = listen_window(length);
+        let track = song.1.clone().filter(|_| settings.song_preview);
+        let mut music = Music::new(
+            track,
+            0.0,
+            settings.sfx_volume,
+            settings.audio_buffer as u32,
+        );
+        music.restart(self.from);
+        music.set_paused(self.paused);
+        self.music = Some(music);
+        let clip = song.0.video.as_ref().filter(|_| settings.song_video);
+        wallpaper::set_song_video(clip);
+        wallpaper::set_song_video_nudge(offsets.get(&entry.label()) / 1000.0);
+        self.song = Some((entry, song));
     }
 }
 
@@ -592,7 +911,7 @@ impl Select {
         let message = status
             .or(self.error.as_deref())
             .or(self.notice.as_deref())
-            .unwrap_or("Drag maps (.sspm .phxm .rhm .txt) or songs (.mp3 .ogg .wav .flac) onto this window");
+            .unwrap_or("Drag maps (.sspm .phxm .rhm .osz .txt), songs or music videos (.mp3 .ogg .mp4 .webm) here   Shift+drop sets a wallpaper");
         let c = if self.error.is_some() && status.is_none() {
             Color::new(1.0, 0.45, 0.5, intro)
         } else if self.notice.is_some() && status.is_none() {
@@ -620,6 +939,14 @@ async fn main() {
     let mut perf = Perf::new();
     let mut scores = Scores::load();
     let mut pacer = Pacer::new();
+    let mut limiter = Limiter::default();
+    let mut offsets = VideoOffsets::load();
+    video::start_probe();
+    let vsync_env = vsync_override();
+    let mut shown_vsync = vsync_env.unwrap_or(settings.vsync());
+    let mut cap_now = Cap::Vsync;
+    let mut frame_delay_ms = 0.0f32;
+    let mut fps_meter = FpsMeter::default();
     let report = std::env::var_os("RHYTHM_PERF").is_some();
     if report {
         use macroquad::miniquad::gl;
@@ -636,18 +963,21 @@ async fn main() {
     let mut select = Select::new();
     let mut importer = Importer::new();
     let mut config: Option<SettingsScreen> = None;
+    let mut listen = Listen::new();
     let mut calibration: Option<Calibration> = None;
     let mut shown_fullscreen = settings.fullscreen;
     let mut was_playing = false;
     let mut shown_bypass = false;
     let mut game = match std::env::args_os().nth(1) {
-        Some(path) => match Entry::File(PathBuf::from(path)).load(&settings, &scores) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                select.error = Some(e);
-                None
+        Some(path) => {
+            match Entry::File(PathBuf::from(path)).load(&settings, &scores, &offsets, None) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    select.error = Some(e);
+                    None
+                }
             }
-        },
+        }
         None => None,
     };
     let first_frame_ms = process_age_ms();
@@ -658,6 +988,7 @@ async fn main() {
     let mut frames_seen = 0u32;
     loop {
         let frame_ms = perf.tick();
+        let fps_now = fps_meter.tick(frame_ms);
         frames_seen += 1;
         if let (Some((_, secs)), Some((began, cpu0))) = (bench, bench_run) {
             let wall = began.elapsed().as_secs_f64();
@@ -674,6 +1005,12 @@ async fn main() {
                 v["first_frame_ms"] = first_frame_ms.into();
                 v["pacer_ms"] = pacer.delay_ms().into();
                 v["pacer_misses"] = pacer.misses.into();
+                v["cap"] = cap_now.label().into();
+                v["vsync"] = shown_vsync.into();
+                v["frame_delay_ms"] = frame_delay_ms.into();
+                let avg_ms = v["frame_ms"]["avg"].as_f64().unwrap_or(0.0);
+                v["fps"] = (1000.0 / avg_ms.max(0.001)).into();
+                v["video_options"] = format!("{:?}", settings.video_options()).into();
                 v["wall_s"] = wall.into();
                 v["nice"] = proc_stat_fields()
                     .get(16)
@@ -722,17 +1059,33 @@ async fn main() {
             }
         }
         was_playing = playing;
+        // No XGetInputFocus round trips during play: the unfocused cap never applies then
+        // (FocusIn/FocusOut still update focus; the poll resumes after the song).
+        macroquad::miniquad::window::set_focus_poll(!playing);
+        // A benchmark window sits on another monitor, usually without focus.
+        let focused = bench.is_some() || macroquad::miniquad::window::is_focused();
+        let idle = !focused && !playing;
+        let vsync = vsync_env.unwrap_or(settings.vsync());
+        if vsync != shown_vsync {
+            macroquad::miniquad::window::set_swap_interval(i32::from(vsync));
+            shown_vsync = vsync;
+        }
+        cap_now = if idle {
+            Cap::Fps(UNFOCUSED_FPS)
+        } else if game.is_some() || calibration.is_some() {
+            settings.game_cap()
+        } else {
+            settings.menu_cap(vsync)
+        };
+        // The low-latency pacer trims the vsync wait; it has nothing to do under a sleep cap.
         pacer.update(
-            playing && settings.low_latency,
+            playing && settings.low_latency && vsync && cap_now == Cap::Vsync,
             frame_ms,
             perf.stats().p50_ms,
         );
-        let delay = if game.is_none() && calibration.is_none() {
-            MENU_FRAME_DELAY
-        } else {
-            f64::from(pacer.delay_ms()) / 1000.0
-        };
-        macroquad::miniquad::window::set_frame_delay(delay);
+        frame_delay_ms = limiter.delay_ms(cap_now, frame_ms, vsync, pacer.delay_ms());
+        macroquad::miniquad::window::set_frame_delay(f64::from(frame_delay_ms) / 1000.0);
+        wallpaper::set_paused(idle);
         if is_key_pressed(KeyCode::F3) {
             settings.space = settings.space.next();
         }
@@ -753,6 +1106,7 @@ async fn main() {
         }
         fx.enabled = settings.glow;
         look::set_active(settings.look);
+        wallpaper::set_video_look(settings.video_dim, settings.video_options());
         wallpaper::sync(&settings.wallpaper, settings.wallpaper_dim);
         if let Some(c) = &mut calibration {
             if c.update(&mut settings) {
@@ -784,6 +1138,11 @@ async fn main() {
         } else if let Some(g) = &mut game {
             let started = std::time::Instant::now();
             let step = g.update();
+            if g.video_steps != 0 {
+                g.video_offset_ms = offsets.nudge(&g.key, std::mem::take(&mut g.video_steps));
+                wallpaper::set_song_video_nudge(g.video_offset_ms / 1000.0);
+                offsets.save();
+            }
             if g.phase == game::Phase::Finished && !g.recorded {
                 g.recorded = true;
                 if !g.run.failed {
@@ -805,9 +1164,10 @@ async fn main() {
             perf.update(update_ms);
             match step {
                 Action::Continue => {
+                    wallpaper::song_video_time(g.music.time());
                     g.space = settings.space;
                     g.stats = perf.stats();
-                    g.stats.delay_ms = pacer.delay_ms();
+                    g.stats.delay_ms = frame_delay_ms;
                     g.draw(&skin, &mut fx);
                     perf.cpu(started);
                     let cpu_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -840,6 +1200,7 @@ async fn main() {
                     settings.sensitivity = out.sensitivity;
                     settings.offset_ms = out.offset_ms;
                     settings.save();
+                    wallpaper::set_song_video(None);
                     game = None;
                     select = Select {
                         error: None,
@@ -854,10 +1215,12 @@ async fn main() {
                 .into_iter()
                 .filter_map(|f| f.path)
                 .collect();
-            let (pictures, rest): (Vec<PathBuf>, Vec<PathBuf>) =
-                dropped.into_iter().partition(|p| wallpaper::is_image(p));
-            for picture in &pictures {
-                match wallpaper::import(picture) {
+            let as_wallpaper = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+            let (walls, rest): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| {
+                wallpaper::is_image(p) || (as_wallpaper && wallpaper::is_wallpaper(p))
+            });
+            let mut wallpaper_set =
+                |result: Result<String, String>, select: &mut Select| match result {
                     Ok(name) => {
                         settings.wallpaper = name.clone();
                         settings.save();
@@ -866,25 +1229,43 @@ async fn main() {
                         select.error = None;
                     }
                     Err(e) => select.error = Some(e),
+                };
+            for wall in walls {
+                if wallpaper::is_image(&wall) {
+                    // decoded into a texture, so it stays on this thread (images are capped at 64 MB)
+                    wallpaper_set(wallpaper::import(&wall), &mut select);
+                } else {
+                    importer.submit(Job::Wallpaper(wall));
                 }
             }
             if !rest.is_empty() {
-                importer.submit(rest);
+                importer.submit(Job::Songs(rest));
             }
-            for report in importer.poll() {
-                select.apply(&report);
+            for done in importer.poll() {
+                match done {
+                    Done::Songs(report) => select.apply(&report),
+                    Done::Wallpaper(result) => wallpaper_set(result, &mut select),
+                }
             }
             match select.update() {
                 Some(Pick::Quit) => break,
                 Some(Pick::Settings) => {
-                    config = Some(SettingsScreen::new());
+                    let entry = select.entries[select.selected].clone();
+                    let mut screen = SettingsScreen::new();
+                    if let Some((map, track)) = listen.take(&entry) {
+                        let nudge = offsets.get(&entry.label()) / 1000.0;
+                        let video = map.video.clone().map(|clip| (clip, nudge));
+                        screen.set_preview(preview::Preview::new(map, track, &settings), video);
+                    }
+                    config = Some(screen);
                     next_frame().await;
                     continue;
                 }
                 Some(Pick::Play(entry)) => {
                     select.draw(&skin, &mut fx, &settings, &scores, Some("loading..."));
                     next_frame().await;
-                    match entry.load(&settings, &scores) {
+                    let ready = listen.take(&entry);
+                    match entry.load(&settings, &scores, &offsets, ready) {
                         Ok(g) => game = Some(g),
                         Err(e) => select.error = Some(e),
                     }
@@ -892,10 +1273,20 @@ async fn main() {
                     continue;
                 }
                 None => {
-                    let status = (importer.pending > 0).then_some("importing songs...");
+                    if bench.is_none() {
+                        listen.update(&select.entries[select.selected], &settings, &offsets, !idle);
+                        if settings.song_video && listen.video_missing() && select.error.is_none() {
+                            select.notice =
+                                Some("this song has a video, install ffmpeg to see it".into());
+                        }
+                    }
+                    let status = (importer.pending > 0).then_some("importing...");
                     select.draw(&skin, &mut fx, &settings, &scores, status);
                 }
             }
+        }
+        if settings.show_fps {
+            draw_fps(&skin, fps_now, cap_now, shown_vsync);
         }
         if is_key_pressed(KeyCode::F12) {
             if let Err(e) = std::fs::create_dir_all("screenshots") {
@@ -910,7 +1301,89 @@ async fn main() {
         }
         let waited = std::time::Instant::now();
         next_frame().await;
-        perf.swap(waited.elapsed().as_secs_f32() * 1000.0, pacer.delay_ms());
+        perf.swap(waited.elapsed().as_secs_f32() * 1000.0, frame_delay_ms);
     }
     settings.save();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listen_window_never_runs_past_the_track() {
+        assert_eq!(listen_window(100.0), (40.0, 24.0));
+        assert_eq!(listen_window(30.0), (6.0, 24.0));
+        // a 10 s track loops all of it instead of 14 s of silence
+        assert_eq!(listen_window(10.0), (0.0, 10.0));
+        assert_eq!(listen_window(0.0), (0.0, 1.0));
+        assert_eq!(listen_window(f64::NAN), (0.0, 1.0));
+        // the fade reaches zero at the real loop end
+        assert_eq!(listen_fade(10.0, 10.0), 0.0);
+        assert_eq!(listen_fade(5.0, 10.0), 1.0);
+        assert!(listen_fade(9.6, 10.0) < 0.6);
+    }
+
+    #[test]
+    fn loads_drop_stale_results_and_remember_failures() {
+        let mut l: Loads<&str> = Loads::default();
+        l.select(&"a");
+        let (ga, ea) = l.ask(&"a").unwrap();
+        assert_eq!(ea, "a");
+        assert!(l.ask(&"a").is_none(), "one request per selection");
+        // the selection moves on before "a" finishes: its result is stale
+        l.select(&"b");
+        let (gb, _) = l.ask(&"b").unwrap();
+        assert_eq!(l.finish(ga, Ok(1)), None);
+        assert_eq!(l.finish(gb, Ok(2)), Some(2));
+        // a failure is remembered while the selection stays...
+        l.select(&"c");
+        let (gc, _) = l.ask(&"c").unwrap();
+        assert_eq!(l.finish::<i32>(gc, Err("bad file".into())), None);
+        assert!(l.ask(&"c").is_none(), "no retry loop");
+        l.cancel(); // leaving song select and coming back to the same entry
+        l.select(&"c");
+        assert!(l.ask(&"c").is_none());
+        // ...and forgotten once it moves
+        l.select(&"d");
+        l.select(&"c");
+        let (old, _) = l.ask(&"c").unwrap();
+        // a late failure of an old request does not mark the new entry
+        l.select(&"e");
+        assert_eq!(l.finish::<i32>(old, Err("late".into())), None);
+        assert!(l.ask(&"e").is_some());
+    }
+
+    #[test]
+    fn the_loader_is_one_thread_that_skips_to_the_newest_request() {
+        use std::sync::{Arc, Mutex, mpsc};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let log = seen.clone();
+        let (jobs, results) = spawn_loader(move |n: u32| {
+            log.lock().unwrap().push(n);
+            gate.lock().unwrap().recv().unwrap();
+            n * 10
+        });
+        jobs.send((1, 1)).unwrap();
+        // while job 1 decodes, the selection scrolls through 2, 3, 4
+        while seen.lock().unwrap().is_empty() {
+            std::thread::yield_now();
+        }
+        for n in 2..=4 {
+            jobs.send((u64::from(n), n)).unwrap();
+        }
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        let got: Vec<(u64, u32)> = (0..2)
+            .map(|_| {
+                results
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(got, [(1, 10), (4, 40)]);
+        assert_eq!(*seen.lock().unwrap(), [1, 4], "2 and 3 were never decoded");
+    }
 }

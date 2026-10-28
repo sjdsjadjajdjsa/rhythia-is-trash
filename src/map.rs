@@ -35,6 +35,7 @@ pub struct Map {
     pub mappers: String,
     pub notes: Vec<Note>,
     pub audio: Option<Vec<u8>>,
+    pub video: Option<crate::video::Clip>,
 }
 
 impl Map {
@@ -55,7 +56,13 @@ impl Map {
             mappers: mappers.into(),
             notes,
             audio,
+            video: None,
         }
+    }
+
+    pub fn with_video(mut self, video: Option<crate::video::Clip>) -> Self {
+        self.video = video;
+        self
     }
 
     pub fn end_time(&self) -> f64 {
@@ -85,7 +92,7 @@ impl Map {
                 "sspm" => sspm(&read(path)?),
                 "phxm" => phxm_zip(&read(path)?),
                 "rhm" => rhm(&read(path)?),
-                "osz" => osz(&read(path)?),
+                "osz" => osz(&read(path)?, path),
                 "osu" => osu_file(path),
                 e if AUDIO_EXTS.contains(&e) => song(path),
                 _ => Err(format!("unsupported map format .{ext}")),
@@ -192,7 +199,11 @@ fn song(path: &Path) -> Result<Map, String> {
     let bytes = read(path)?;
     let data = crate::audio::decode(bytes.clone())?;
     let notes = crate::chart::generate(&data);
-    Ok(Map::new(stem(path), AUTO_MAPPER, notes, Some(bytes)))
+    let video = crate::video::is_video(path).then(|| crate::video::Clip {
+        source: crate::video::Source::File(path.to_path_buf()),
+        offset: 0.0,
+    });
+    Ok(Map::new(stem(path), AUTO_MAPPER, notes, Some(bytes)).with_video(video))
 }
 
 fn txt(path: &Path) -> Result<Map, String> {
@@ -509,6 +520,36 @@ struct Osu {
     mapper: String,
     audio: String,
     notes: Vec<Note>,
+    video: Option<(String, f64)>,
+}
+
+fn osu_video_event(line: &str) -> Option<(String, f64)> {
+    let mut fields = line.splitn(3, ',');
+    if !matches!(fields.next()?.trim(), "Video" | "1") {
+        return None;
+    }
+    let offset = fields.next()?.trim().parse::<f64>().ok()? / 1000.0;
+    if !offset.is_finite() {
+        return None;
+    }
+    let rest = fields.next()?.trim();
+    let name = if let Some(quoted) = rest.strip_prefix('"') {
+        quoted.split_once('"')?.0
+    } else {
+        rest.split(',').next()?.trim()
+    };
+    let name = name.replace('\\', "/");
+    if name.is_empty()
+        || Path::new(&name).components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    Some((name, offset))
 }
 
 fn osu(text: &str) -> Result<Osu, String> {
@@ -518,6 +559,7 @@ fn osu(text: &str) -> Result<Osu, String> {
         mapper: String::new(),
         audio: String::new(),
         notes: Vec::new(),
+        video: None,
     };
     let (mut title, mut artist, mut mode) = (String::new(), String::new(), 0_u32);
     for line in text.lines() {
@@ -546,6 +588,11 @@ fn osu(text: &str) -> Result<Osu, String> {
                     "Artist" => artist = value,
                     "Creator" => found.mapper = value,
                     _ => {}
+                }
+            }
+            "Events" => {
+                if let Some(video) = osu_video_event(line) {
+                    found.video = Some(video);
                 }
             }
             "HitObjects" => {
@@ -593,12 +640,16 @@ fn osu_file(path: &Path) -> Result<Map, String> {
         .filter(|p| p.is_file())
         .map(|p| read(&p))
         .transpose()?;
-    Ok(Map::new(parsed.title, parsed.mapper, parsed.notes, audio))
+    let video = parsed.video.map(|(name, offset)| crate::video::Clip {
+        source: crate::video::Source::File(path.parent().unwrap_or(Path::new(".")).join(name)),
+        offset,
+    });
+    Ok(Map::new(parsed.title, parsed.mapper, parsed.notes, audio).with_video(video))
 }
 
-fn osz(buf: &[u8]) -> Result<Map, String> {
+fn osz(buf: &[u8], archive: &Path) -> Result<Map, String> {
     let mut zip = Zip::open(buf)?;
-    let mut best: Option<Osu> = None;
+    let mut best: Option<(String, Osu)> = None;
     let mut last_error = String::from("no .osu difficulty inside");
     for name in zip
         .names()
@@ -607,18 +658,69 @@ fn osz(buf: &[u8]) -> Result<Map, String> {
     {
         let text = String::from_utf8_lossy(&zip.entry(&name)?).into_owned();
         match osu(&text) {
-            Ok(o) if best.as_ref().is_none_or(|b| o.notes.len() > b.notes.len()) => best = Some(o),
+            Ok(o)
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, b)| o.notes.len() > b.notes.len()) =>
+            {
+                best = Some((name, o))
+            }
             Ok(_) => {}
             Err(e) => last_error = e,
         }
     }
-    let parsed = best.ok_or(last_error)?;
+    let (difficulty, parsed) = best.ok_or(last_error)?;
     let audio_name = zip
         .names()
         .into_iter()
         .find(|n| n.eq_ignore_ascii_case(&parsed.audio));
     let audio = audio_name.map(|n| zip.entry(&n)).transpose()?;
-    Ok(Map::new(parsed.title, parsed.mapper, parsed.notes, audio))
+    let video = parsed.video.and_then(|(name, offset)| {
+        let entry = zip_video_entry(&difficulty, &name, &zip.names())?;
+        Some(crate::video::Clip {
+            source: crate::video::Source::Zip {
+                archive: archive.to_path_buf(),
+                entry,
+            },
+            offset,
+        })
+    });
+    Ok(Map::new(parsed.title, parsed.mapper, parsed.notes, audio).with_video(video))
+}
+
+/// A zip entry name in canonical form: '/' separators (never `Path::join`, which uses '\'
+/// on Windows), no `.` or empty segments, lowercase for comparison. `..` is refused.
+fn zip_name_key(name: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in name.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            p => parts.push(p),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/").to_lowercase())
+}
+
+/// The stored zip entry for an osu! video event `name`: looked up next to the chosen
+/// difficulty first, then from the archive root, case-insensitively.
+fn zip_video_entry(difficulty: &str, name: &str, names: &[String]) -> Option<String> {
+    let difficulty = difficulty.replace('\\', "/");
+    let beside = difficulty
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/{name}"));
+    let wanted: Vec<String> = beside
+        .iter()
+        .map(String::as_str)
+        .chain([name])
+        .filter_map(zip_name_key)
+        .collect();
+    wanted.iter().find_map(|want| {
+        names
+            .iter()
+            .find(|n| zip_name_key(n).as_ref() == Some(want))
+            .cloned()
+    })
 }
 
 fn rhm(buf: &[u8]) -> Result<Map, String> {
@@ -665,6 +767,66 @@ mod osu_tests {
     }
 
     #[test]
+    fn reads_video_events_in_both_syntaxes_with_quoted_names_and_offsets() {
+        for (line, expected) in [
+            (
+                "Video,1234,\"my video, live.mp4\",0,0",
+                ("my video, live.mp4", 1.234),
+            ),
+            ("1,-250,\"folder\\clip.webm\"", ("folder/clip.webm", -0.25)),
+        ] {
+            let parsed = osu(&format!("{MAP}\n[Events]\n{line}\n")).unwrap();
+            assert_eq!(parsed.video, Some((expected.0.to_owned(), expected.1)));
+        }
+        for line in [
+            "0,0,\"background.jpg\"",
+            "Video,NaN,\"x.mp4\"",
+            "1,0,\"../x.mp4\"",
+        ] {
+            assert!(osu_video_event(line).is_none());
+        }
+    }
+
+    #[test]
+    fn zip_video_names_use_forward_slashes_and_normalise() {
+        let names: Vec<String> = [
+            "Song/hard.osu",
+            "Song/BG/Clip.mp4",
+            "root.mp4",
+            "win\\style.mp4",
+        ]
+        .map(String::from)
+        .to_vec();
+        let find = |d: &str, n: &str| zip_video_entry(d, n, &names);
+        // beside the difficulty, any separator, any case, with ./ and doubled slashes
+        for n in ["bg/clip.mp4", "BG\\Clip.mp4", "./BG//clip.MP4"] {
+            assert_eq!(
+                find("Song/hard.osu", n).as_deref(),
+                Some("Song/BG/Clip.mp4"),
+                "{n}"
+            );
+        }
+        assert_eq!(
+            find("Song\\hard.osu", "bg\\clip.mp4").as_deref(),
+            Some("Song/BG/Clip.mp4")
+        );
+        // falls back to the archive root
+        assert_eq!(
+            find("Song/hard.osu", "root.mp4").as_deref(),
+            Some("root.mp4")
+        );
+        // an entry stored with backslashes (zipped on Windows) is still found
+        assert_eq!(
+            find("x.osu", "win/style.mp4").as_deref(),
+            Some("win\\style.mp4")
+        );
+        assert_eq!(find("Song/hard.osu", "../root.mp4"), None);
+        assert_eq!(find("Song/hard.osu", "missing.mp4"), None);
+        assert_eq!(zip_name_key("a\\b/./c.MP4").as_deref(), Some("a/b/c.mp4"));
+        assert_eq!(zip_name_key("./"), None);
+    }
+
+    #[test]
     fn other_osu_modes_are_refused() {
         assert!(
             osu(&MAP.replace("Mode: 0", "Mode: 3"))
@@ -679,17 +841,24 @@ mod osu_tests {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let opts = zip::write::SimpleFileOptions::default();
         let small = MAP.replace("2500,5,0\n", "");
+        let hard = format!("{MAP}\n[Events]\n1,-300,\"Video Clip.MP4\"\n");
         for (name, body) in [
             ("easy.osu", small.as_bytes()),
-            ("hard.osu", MAP.as_bytes()),
+            ("hard.osu", hard.as_bytes()),
             ("Song.MP3", b"audio".as_slice()),
+            ("Video Clip.mp4", b"video".as_slice()),
         ] {
             zip.start_file(name, opts).unwrap();
             zip.write_all(body).unwrap();
         }
         let bytes = zip.finish().unwrap().into_inner();
-        let map = osz(&bytes).unwrap();
+        let map = osz(&bytes, Path::new("pack.osz")).unwrap();
         assert_eq!(map.notes.len(), 3);
         assert_eq!(map.audio.as_deref(), Some(b"audio".as_slice()));
+        let clip = map.video.unwrap();
+        assert_eq!(clip.offset, -0.3);
+        assert!(
+            matches!(clip.source, crate::video::Source::Zip { archive, entry } if archive == Path::new("pack.osz") && entry == "Video Clip.mp4")
+        );
     }
 }

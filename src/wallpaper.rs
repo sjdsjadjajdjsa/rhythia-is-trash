@@ -21,6 +21,10 @@ pub fn is_image(path: &Path) -> bool {
         })
 }
 
+pub fn is_wallpaper(path: &Path) -> bool {
+    is_image(path) || crate::video::is_video(path)
+}
+
 pub fn scan(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -28,7 +32,7 @@ pub fn scan(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<_> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && is_image(path))
+        .filter(|path| path.is_file() && is_wallpaper(path))
         .collect();
     paths.sort_by_key(|path| {
         path.file_name()
@@ -145,43 +149,297 @@ fn downscale(image: &mut Image) {
     image.height = out_h as u16;
 }
 
+use crate::video::{Clip, Options, Video};
+
+/// One playing video plus, while it is being reopened at new decode settings, the old one
+/// (drawn until the new one has a frame, so a quality change never flashes the wallpaper).
+struct Slot {
+    clip: Clip,
+    looping: bool,
+    video: Video,
+    old: Option<Video>,
+    /// The decoder's error was logged.
+    reported: bool,
+}
+
+impl Slot {
+    fn open(clip: Clip, looping: bool, options: Options) -> Slot {
+        Slot {
+            video: Video::open(&clip, looping, options),
+            clip,
+            looping,
+            old: None,
+            reported: false,
+        }
+    }
+
+    fn configure(&mut self, options: Options) {
+        if self.video.options() != options {
+            let fresh = Video::open(&self.clip, self.looping, options).without_fade();
+            let previous = std::mem::replace(&mut self.video, fresh);
+            if previous.ready() || self.old.is_none() {
+                self.old = Some(previous);
+            }
+            self.reported = false;
+        }
+    }
+
+    fn sync(&mut self, t: f64) {
+        self.video.sync(t);
+        if !self.reported
+            && let Some(e) = self.video.error()
+        {
+            self.reported = true;
+            eprintln!("video {:?}: {e}", self.clip.source);
+        }
+        if self.video.ready() {
+            self.old = None;
+        } else if let Some(old) = &mut self.old {
+            old.sync(t);
+        }
+    }
+
+    fn current(&self) -> Option<&Video> {
+        Some(&self.video)
+            .filter(|v| v.ready())
+            .or_else(|| self.old.as_ref().filter(|v| v.ready()))
+    }
+}
+
+/// A wallpaper other than the live one: the settings screen's "before" (hold B).
+struct Alt {
+    name: String,
+    wall: Option<Wallpaper>,
+    video: Option<Slot>,
+}
+
+/// Opens wallpaper `name` from the wallpaper folder: a looping video slot or an image.
+fn open(name: &str, options: Options) -> (Option<Wallpaper>, Option<Slot>) {
+    if name.is_empty() {
+        return (None, None);
+    }
+    let file = Path::new(name).file_name().unwrap_or_default();
+    let path = Path::new(FOLDER).join(file);
+    if crate::video::is_video(&path) {
+        let clip = Clip {
+            source: crate::video::Source::File(path),
+            offset: 0.0,
+        };
+        return (
+            None,
+            Some(Slot::open(clip, true, Options { blur: 0, ..options })),
+        );
+    }
+    match Wallpaper::load(&path) {
+        Ok(w) => (Some(w), None),
+        Err(e) => {
+            eprintln!("wallpaper {name}: {e}");
+            (None, None)
+        }
+    }
+}
+
 #[derive(Default)]
 struct Active {
     name: String,
     wall: Option<Wallpaper>,
+    video: Option<Slot>,
+    song: Option<Slot>,
+    /// Song video offset: the clip's own plus the per-song nudge (seconds).
+    song_offset: f64,
     dim: f32,
+    video_dim: f32,
+    options: Options,
+    /// Wallpaper videos pause (their clock stops) while the window is unfocused.
+    paused_at: Option<f64>,
+    paused_total: f64,
+    /// Settings preview "before": wallpaper name, wallpaper dim, video dim.
+    before: Option<(String, f32, f32)>,
+    /// The wallpaper (image or video) for `before`, loaded once per name.
+    alt: Option<Alt>,
+    /// While the settings screen is open: the wallpaper it opened with, kept as `alt` when
+    /// the live wallpaper changes away from it.
+    keep: Option<String>,
+    /// The song video belongs to the settings preview: drawn only while `in_preview`.
+    song_scoped: bool,
+    in_preview: bool,
 }
 
 thread_local! {
     static ACTIVE: RefCell<Active> = RefCell::new(Active::default());
 }
 
+/// Opens (or clears) the song's music video with the current video settings.
+pub fn set_song_video(clip: Option<&Clip>) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        let options = a.options;
+        a.song_offset = clip.map_or(0.0, |c| c.offset);
+        a.song = clip.map(|c| Slot::open(c.clone(), false, options));
+        a.song_scoped = false;
+    });
+}
+
+/// Opens (or clears) a song video shown only inside the settings preview, that is between
+/// `set_in_preview(true)` and `set_in_preview(false)`; synced with `song_video_time`.
+pub fn set_preview_song_video(clip: Option<&Clip>) {
+    set_song_video(clip);
+    ACTIVE.with(|cell| cell.borrow_mut().song_scoped = clip.is_some());
+}
+
+/// Marks the settings preview being drawn (a preview song video shows only then).
+pub fn set_in_preview(on: bool) {
+    ACTIVE.with(|cell| cell.borrow_mut().in_preview = on);
+}
+
+/// The settings screen opened with wallpaper `name` (Some) or closed (None). While open,
+/// that wallpaper (image or playing video) stays loaded for "before" (B) even after the live
+/// wallpaper changes; closing drops it.
+pub fn keep_before(name: Option<&str>) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        a.keep = name.map(str::to_owned);
+        if a.keep.is_none() {
+            a.alt = None;
+        }
+    });
+}
+
+/// Extra per-song offset (seconds, positive = video later), on top of the clip's own.
+pub fn set_song_video_nudge(extra: f64) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        if let Some(slot) = &a.song {
+            let base = slot.clip.offset;
+            a.song_offset = base + extra;
+        }
+    });
+}
+
+pub fn has_song_video() -> bool {
+    ACTIVE.with(|cell| cell.borrow().song.is_some())
+}
+
+pub fn song_video_time(t: f64) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        let offset = a.song_offset;
+        if let Some(slot) = &mut a.song {
+            slot.sync(t - offset);
+        }
+    });
+}
+
+/// Music video look and decode settings; a change of quality, rate or blur reopens the
+/// playing videos at the same time. Wallpaper videos are never blurred.
+pub fn set_video_look(video_dim: f32, options: Options) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        a.video_dim = video_dim;
+        a.options = options;
+        if let Some(slot) = &mut a.song {
+            slot.configure(options);
+        }
+        if let Some(slot) = &mut a.video {
+            slot.configure(Options { blur: 0, ..options });
+        }
+        if let Some(slot) = a.alt.as_mut().and_then(|alt| alt.video.as_mut()) {
+            slot.configure(Options { blur: 0, ..options });
+        }
+    });
+}
+
+/// Stops (or resumes) the clock of looping wallpaper videos.
+pub fn set_paused(paused: bool) {
+    ACTIVE.with(|cell| {
+        let mut a = cell.borrow_mut();
+        let now = macroquad::time::get_time();
+        match (paused, a.paused_at) {
+            (true, None) => a.paused_at = Some(now),
+            (false, Some(at)) => {
+                a.paused_total += now - at;
+                a.paused_at = None;
+            }
+            _ => {}
+        }
+    });
+}
+
+/// While Some, `backdrop` shows this wallpaper and these dims instead (settings preview, B).
+pub fn set_before(before: Option<(&str, f32, f32)>) {
+    ACTIVE.with(|cell| {
+        cell.borrow_mut().before = before.map(|(n, d, v)| (n.to_owned(), d, v));
+    });
+}
+
 pub fn sync(name: &str, dim: f32) {
     ACTIVE.with(|cell| {
         let mut a = cell.borrow_mut();
         a.dim = dim;
+        let clock = a.paused_at.unwrap_or_else(macroquad::time::get_time) - a.paused_total;
+        if let Some(slot) = &mut a.video {
+            slot.sync(clock);
+        }
+        // The kept "before" video runs on the same clock, so B shows it at once and in step.
+        if let Some(slot) = a.alt.as_mut().and_then(|alt| alt.video.as_mut()) {
+            slot.sync(clock);
+        }
         if a.name == name {
             return;
         }
-        a.name = name.to_owned();
-        a.wall = None;
-        if name.is_empty() {
-            return;
+        let old = Alt {
+            name: std::mem::replace(&mut a.name, name.to_owned()),
+            wall: a.wall.take(),
+            video: a.video.take(),
+        };
+        // Back to the kept wallpaper: reuse it instead of loading it again.
+        let reuse = a.alt.take_if(|alt| alt.name == name);
+        if a.keep.as_deref() == Some(old.name.as_str()) {
+            a.alt = Some(old);
         }
-        let file = Path::new(name).file_name().unwrap_or_default();
-        match Wallpaper::load(&Path::new(FOLDER).join(file)) {
-            Ok(w) => a.wall = Some(w),
-            Err(e) => eprintln!("wallpaper {name}: {e}"),
-        }
+        (a.wall, a.video) = match reuse {
+            Some(alt) => (alt.wall, alt.video),
+            None => open(name, a.options),
+        };
     });
 }
 
 pub fn backdrop(cam: &Camera3D) -> bool {
     ACTIVE.with(|cell| {
-        let a = cell.borrow();
-        let Some(wall) = &a.wall else {
-            return false;
+        let mut a = cell.borrow_mut();
+        // "before" with another wallpaper not kept yet: open it once (image or video; a
+        // video's first frame follows a frame later, once `sync` has run its clock).
+        if let Some((name, _, _)) = &a.before
+            && *name != a.name
+            && a.alt.as_ref().is_none_or(|alt| alt.name != *name)
+        {
+            let name = name.clone();
+            let (wall, video) = open(&name, a.options);
+            a.alt = Some(Alt { name, wall, video });
+        }
+        let a = &*a;
+        let (dim, video_dim, own) = match &a.before {
+            Some((name, d, v)) => (*d, *v, *name == a.name),
+            None => (a.dim, a.video_dim, true),
         };
+        let song = a
+            .song
+            .as_ref()
+            .filter(|_| !a.song_scoped || a.in_preview)
+            .and_then(Slot::current);
+        let (wall, wall_video) = if own {
+            (a.wall.as_ref(), a.video.as_ref())
+        } else {
+            let alt = a.alt.as_ref();
+            (
+                alt.and_then(|alt| alt.wall.as_ref()),
+                alt.and_then(|alt| alt.video.as_ref()),
+            )
+        };
+        let wall_video = wall_video.and_then(Slot::current);
+        if song.is_none() && wall_video.is_none() && wall.is_none() {
+            return false;
+        }
         let size = match &cam.render_target {
             Some(t) => vec2(t.texture.width(), t.texture.height()),
             None => vec2(screen_width(), screen_height()),
@@ -190,7 +448,15 @@ pub fn backdrop(cam: &Camera3D) -> bool {
         flat.render_target = cam.render_target.clone();
         set_camera(&flat);
         clear_background(BLACK);
-        wall.draw(size, a.dim, Vec2::ZERO);
+        // The song video fades in over the wallpaper, so draw the wallpaper first.
+        if let Some(video) = wall_video {
+            video.draw(size, dim);
+        } else if let Some(wall) = wall {
+            wall.draw(size, dim, Vec2::ZERO);
+        }
+        if let Some(video) = song {
+            video.draw(size, video_dim);
+        }
         set_camera(cam);
         true
     })
@@ -198,8 +464,16 @@ pub fn backdrop(cam: &Camera3D) -> bool {
 
 pub const FOLDER: &str = "wallpapers";
 
+/// Imports a wallpaper. Images are decoded into a texture first (render thread only); a video
+/// is only copied, so main runs video imports on its importer thread (they can be large).
 pub fn import(src: &Path) -> Result<String, String> {
-    Wallpaper::load(src)?;
+    if crate::video::is_video(src) {
+        if !src.is_file() {
+            return Err("Wallpaper video is not a file".into());
+        }
+    } else {
+        Wallpaper::load(src)?;
+    }
     copy_in(Path::new(FOLDER), src)
 }
 
@@ -209,7 +483,7 @@ fn copy_in(dir: &Path, src: &Path) -> Result<String, String> {
         .ok_or_else(|| "no file name".to_string())?
         .to_owned();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let same = |a: &Path, b: &Path| std::fs::read(a).ok() == std::fs::read(b).ok();
+    let same = |a: &Path, b: &Path| same_file_contents(a, b);
     let mut candidate = dir.join(&name);
     let (stem, ext) = {
         let p = Path::new(&name);
@@ -241,6 +515,33 @@ fn copy_in(dir: &Path, src: &Path) -> Result<String, String> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned())
+}
+
+/// Compares two files in small chunks after a size check, so a multi-GB video wallpaper
+/// dropped twice is never read into memory.
+fn same_file_contents(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let (mut fa, mut fb) = (std::io::BufReader::new(fa), std::io::BufReader::new(fb));
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let n = match fa.read(&mut ba) {
+            Ok(0) => return true,
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+    }
 }
 
 impl Wallpaper {
@@ -366,6 +667,19 @@ mod tests {
     }
 
     #[test]
+    fn video_wallpapers_are_recognized_and_scanned() {
+        let dir = temp_dir();
+        for name in ["clip.MP4", "clip.webm", "clip.mkv", "no.mp3"] {
+            std::fs::write(dir.join(name), []).unwrap();
+        }
+        assert!(is_wallpaper(&dir.join("clip.MP4")));
+        assert!(!is_image(&dir.join("clip.MP4")));
+        assert!(!is_wallpaper(&dir.join("no.mp3")));
+        assert_eq!(scan(&dir).len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn scans_and_sorts_images_case_insensitively() {
         let dir = temp_dir();
         for name in ["z.png", "A.PNG", "b.png", "ignore.gif"] {
@@ -473,5 +787,40 @@ mod tests {
         assert_eq!(std::fs::read(wall.join("a.png")).unwrap(), b"one");
         assert_eq!(std::fs::read(wall.join("a (2).png")).unwrap(), b"two");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_contents_checks_length_then_streams_chunks() {
+        let dir = temp_dir();
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let mut tail = big.clone();
+        *tail.last_mut().unwrap() ^= 1;
+        let mut head = big.clone();
+        head[0] ^= 1;
+        for (name, body) in [
+            ("a", &big[..]),
+            ("b", &big[..]),
+            ("tail", &tail[..]),
+            ("head", &head[..]),
+            ("short", &big[..299_999]),
+        ] {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        let same = |x: &str, y: &str| same_file_contents(&dir.join(x), &dir.join(y));
+        assert!(same("a", "b"));
+        assert!(!same("a", "tail"), "difference in the last chunk");
+        assert!(!same("a", "head"));
+        assert!(!same("a", "short") && !same("short", "a"));
+        assert!(!same("a", "missing"));
+        // A 3 GB sparse file of another length is refused from metadata alone (instantly).
+        let huge = dir.join("huge");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(3 << 30)
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(!same("a", "huge"));
+        assert!(started.elapsed().as_millis() < 50);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -373,6 +373,26 @@ pub fn restore(removed: &Removed) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn video_containers_are_song_import_candidates() {
+        let dir = scratch("video-candidates");
+        for name in [
+            "song.mp4",
+            "song.M4V",
+            "song.webm",
+            "song.mkv",
+            "song.mov",
+            "song.avi",
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, []).unwrap();
+            assert!(map::is_audio(&path));
+            assert!(wanted(&path));
+            assert!(!map::is_map(&path));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rhythm-import-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

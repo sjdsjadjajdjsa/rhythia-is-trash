@@ -300,6 +300,12 @@ impl<'a> Text<'a> {
         String::new()
     }
 
+    /// Width of `s` in the regular font at `px`.
+    pub fn width(&self, s: &str, px: f32) -> f32 {
+        let size = px.round().clamp(4.0, 300.0) as u16;
+        measure_text(s, Some(&self.skin.font), size, 1.0).width
+    }
+
     fn project(&self, p: Vec3) -> Vec2 {
         let c = self.view * p.extend(1.0);
         vec2(
@@ -602,9 +608,80 @@ impl Game {
         let now = self.now();
         let cam = camera(self.run.cursor, &self.settings);
         let target_cam = fx.begin(&cam);
+        self.draw_world(skin, &target_cam, now);
+        fx.present();
+        let text = Text {
+            skin,
+            view: cam.matrix(),
+            screen: vec2(screen_width(), screen_height()),
+        };
+        self.draw_hud_text(&text, now, true);
+        self.draw_overlay(&text);
+        self.draw_video_offset(&text);
+    }
+
+    /// Brief "video offset" readout after `,` / `.`.
+    fn draw_video_offset(&self, text: &Text) {
+        const SHOW: f64 = 1.6;
+        let age = get_time() - self.video_offset_at;
+        if !(0.0..SHOW).contains(&age) {
+            return;
+        }
+        let alpha = ((SHOW - age) / 0.3).clamp(0.0, 1.0) as f32;
+        let label = format!(
+            "video offset {:+.0} ms   , earlier   . later",
+            self.video_offset_ms
+        );
+        let size = 16.0;
+        let w = text.width(&label, size) + 28.0;
+        // Above the debug line, clear of the title and the score panels.
+        let center = vec2(text.screen.x / 2.0, text.screen.y - 52.0);
+        draw_rectangle(
+            center.x - w / 2.0,
+            center.y - 16.0,
+            w,
+            32.0,
+            Color::new(0.0, 0.0, 0.0, 0.6 * alpha),
+        );
+        text.draw(
+            &label,
+            center,
+            Style {
+                align: Align::Center,
+                ..Style::new(size, Color::new(1.0, 1.0, 1.0, alpha))
+            }
+            .middle(),
+        );
+    }
+
+    /// Renders the game (scene, post effects and world-space HUD text) into `out`,
+    /// sized however the caller likes. `fx` should be a `PostFx` owned by the caller,
+    /// so its targets stay at the panel size. The debug line and overlays are skipped.
+    /// Leaves the default camera set.
+    pub fn draw_into(&self, skin: &Skin, fx: &mut PostFx, out: &RenderTarget) {
+        let size = vec2(out.texture.width(), out.texture.height());
+        let now = self.now();
+        let mut cam = camera(self.run.cursor, &self.settings);
+        cam.aspect = Some(size.x / size.y.max(1.0));
+        let target_cam = fx.begin_sized(&cam, (size.x as u32, size.y as u32));
+        self.draw_world(skin, &target_cam, now);
+        fx.present_to(out);
+        let mut flat = Camera2D::from_display_rect(Rect::new(0.0, 0.0, size.x, size.y));
+        flat.render_target = Some(out.clone());
+        set_camera(&flat);
+        let text = Text {
+            skin,
+            view: cam.matrix(),
+            screen: size,
+        };
+        self.draw_hud_text(&text, now, false);
+        set_default_camera();
+    }
+
+    fn draw_world(&self, skin: &Skin, target_cam: &Camera3D, now: f64) {
         draw_space(
             skin,
-            &target_cam,
+            target_cam,
             self.run.hud.space_color,
             self.space,
             self.settings.approach_rate,
@@ -616,14 +693,6 @@ impl Game {
         self.draw_effects(skin, now);
         self.draw_cursor(skin, now);
         gl_use_default_material();
-        fx.present();
-        let text = Text {
-            skin,
-            view: cam.matrix(),
-            screen: vec2(screen_width(), screen_height()),
-        };
-        self.draw_hud_text(&text, now);
-        self.draw_overlay(&text);
     }
 
     fn draw_hud_3d(&self, skin: &Skin) {
@@ -1092,7 +1161,7 @@ impl Game {
         );
     }
 
-    fn draw_hud_text(&self, text: &Text, now: f64) {
+    fn draw_hud_text(&self, text: &Text, now: f64, debug_line: bool) {
         let run = &self.run;
         let left = panel(-1.0);
         let right = panel(1.0);
@@ -1236,6 +1305,9 @@ impl Game {
                 fade(WHITE, 0.2 + 0.5 * pulse),
                 Align::Center,
             );
+        }
+        if !debug_line {
+            return;
         }
         let info = format!(
             "{:.0} fps {:.1} ms (p99 {:.1})   audio {:.1} ms   pace {:.1} ms   swap {:.1} ms   offset {:+.0} ms  [ ]   sensitivity {:.2}  - =   space {}  F3",

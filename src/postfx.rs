@@ -141,6 +141,13 @@ impl PostFx {
             screen_width().max(1.0) as u32,
             screen_height().max(1.0) as u32,
         );
+        self.begin_sized(camera, size)
+    }
+
+    /// Like `begin`, but the scene target is `size` pixels instead of the window.
+    /// Used by the settings preview, which owns its own `PostFx` sized to its panel.
+    pub fn begin_sized(&mut self, camera: &Camera3D, size: (u32, u32)) -> Camera3D {
+        let size = (size.0.max(1), size.1.max(1));
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(size.0, size.1));
         }
@@ -167,6 +174,35 @@ impl PostFx {
     pub fn present(&self) {
         let t = self.targets.as_ref().expect("begin precedes present");
         let look = crate::look::active();
+        self.bloom(t, look);
+        set_default_camera();
+        clear_background(BLACK);
+        self.set_combine(t, look);
+        gl_use_material(&self.combine);
+        image(&t.scene.texture, vec2(screen_width(), screen_height()));
+        gl_use_default_material();
+    }
+
+    /// Like `present`, but composites into `out` (same orientation as the scene target)
+    /// instead of the window. Leaves the camera pointing at `out`.
+    pub fn present_to(&self, out: &RenderTarget) {
+        let t = self.targets.as_ref().expect("begin precedes present");
+        let look = crate::look::active();
+        self.bloom(t, look);
+        self.set_combine(t, look);
+        pass(&t.scene.texture, out, &self.combine);
+        gl_use_default_material();
+    }
+
+    fn set_combine(&self, t: &Targets, look: &crate::look::Look) {
+        self.combine.set_texture("Bloom", t.bloom.texture.clone());
+        self.combine.set_texture("Wide", t.wide.texture.clone());
+        self.combine
+            .set_uniform("Strength", if self.enabled { look.bloom } else { 0.0f32 });
+        self.combine.set_uniform("Vignette", look.vignette);
+    }
+
+    fn bloom(&self, t: &Targets, look: &crate::look::Look) {
         if self.enabled && look.bloom > 0.0 {
             pass(&t.scene.texture, &t.bloom, &self.extract);
             self.blur
@@ -182,16 +218,6 @@ impl PostFx {
                 .set_uniform("Step", vec2(0.0, 1.0 / t.wide.texture.height()));
             pass(&t.wide_ping.texture, &t.wide, &self.blur);
         }
-        set_default_camera();
-        clear_background(BLACK);
-        self.combine.set_texture("Bloom", t.bloom.texture.clone());
-        self.combine.set_texture("Wide", t.wide.texture.clone());
-        self.combine
-            .set_uniform("Strength", if self.enabled { look.bloom } else { 0.0f32 });
-        self.combine.set_uniform("Vignette", look.vignette);
-        gl_use_material(&self.combine);
-        image(&t.scene.texture, vec2(screen_width(), screen_height()));
-        gl_use_default_material();
     }
 }
 
