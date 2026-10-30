@@ -4,8 +4,8 @@ use macroquad::prelude::*;
 
 use crate::{
     game::{
-        BREAK_LIFE, CURSOR_SIZE, Game, HIT_WINDOW, NoteState, POPUP_LIFE, Phase, TRAIL_TIME,
-        lerp_color, note_hue, prism,
+        BREAK_LIFE, CURSOR_SIZE, Effect, Game, HIT_WINDOW, NoteState, POPUP_LIFE, Phase,
+        TRAIL_TIME, lerp_color, note_hue, prism,
     },
     postfx::PostFx,
     settings::Settings,
@@ -45,7 +45,24 @@ const PROGRESS_BG: Color = Color::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 
 const HITS_ICON: Color = Color::new(160.0 / 255.0, 1.0, 160.0 / 255.0, 1.0);
 const MISS: Color = Color::new(1.0, 160.0 / 255.0, 160.0 / 255.0, 1.0);
 const HIT_FLASH_LIFE: f32 = 0.09;
+const PERFECT_GLOW: Color = Color::new(1.0, 0.93, 0.72, 1.0);
+const MISS_GLOW: Color = Color::new(1.0, 0.25, 0.35, 1.0);
+const MISS_LIFE: f64 = 0.45;
+const PERFECT_LATE: f32 = 0.018;
+const GOOD_LATE: f32 = 0.036;
 const BATCH_QUADS: usize = 800;
+
+/// How a hit landed: (warm tint, share of the full burst). Right on time glows gold with
+/// every shard, a little late keeps the note colour, very late is quieter.
+fn hit_timing(late: f32) -> (f32, f32) {
+    if late <= PERFECT_LATE {
+        (0.7, 1.0)
+    } else if late <= GOOD_LATE {
+        (0.0, 0.75)
+    } else {
+        (0.0, 0.5)
+    }
+}
 
 fn fade(c: Color, a: f32) -> Color {
     Color { a: c.a * a, ..c }
@@ -992,16 +1009,21 @@ impl Game {
                 fade(color, 0.22 * pulse * pulse),
             );
         }
+        let hit_color = |e: &Effect| {
+            let (gold, _) = hit_timing(e.late);
+            lerp_color(self.note_color(e.note), PERFECT_GLOW, gold)
+        };
         let mut halos = Batch::new(&skin.halo);
         for e in &self.run.effects {
             let age = ((now - e.born) / BREAK_LIFE).clamp(0.0, 1.0) as f32;
             if e.score.is_some() {
+                let (_, burst) = hit_timing(e.late);
                 sprite(
                     &mut halos,
                     e.pos.extend(-0.02),
                     Vec2::splat(1.2 + age * 0.5),
                     0.0,
-                    fade(self.note_color(e.note), 0.24 * (1.0 - age).powi(3)),
+                    fade(hit_color(e), 0.24 * burst * (1.0 - age).powi(3)),
                 );
             }
         }
@@ -1011,13 +1033,14 @@ impl Game {
             let t = (now - e.born) as f32;
             if e.score.is_some() && t < HIT_FLASH_LIFE {
                 let a = t / HIT_FLASH_LIFE;
-                let color = lerp_color(self.note_color(e.note), WHITE, 0.65);
+                let (_, burst) = hit_timing(e.late);
+                let color = lerp_color(hit_color(e), WHITE, 0.65 * burst);
                 sprite(
                     &mut flashes,
                     e.pos.extend(0.01),
                     Vec2::splat(self.settings.note_size * (1.0 + 0.3 * a)),
                     0.0,
-                    fade(color, 0.95 * (1.0 - a).powi(2)),
+                    fade(color, 0.95 * burst.max(0.6) * (1.0 - a).powi(2)),
                 );
             }
         }
@@ -1025,26 +1048,40 @@ impl Game {
         let mut waves = Batch::new(&skin.wave);
         for e in &self.run.effects {
             let age = ((now - e.born) / BREAK_LIFE).clamp(0.0, 1.0) as f32;
-            if e.score.is_some() {
-                sprite(
-                    &mut waves,
-                    e.pos.extend(-0.03),
-                    Vec2::splat(0.6 + age * 1.0),
-                    0.0,
-                    fade(self.note_color(e.note), 0.45 * (1.0 - age).powi(2)),
-                );
+            match e.score {
+                Some(_) => {
+                    let (_, burst) = hit_timing(e.late);
+                    sprite(
+                        &mut waves,
+                        e.pos.extend(-0.03),
+                        Vec2::splat(0.6 + age * 1.0),
+                        0.0,
+                        fade(hit_color(e), 0.45 * burst * (1.0 - age).powi(2)),
+                    );
+                }
+                None => {
+                    let age = ((now - e.born) / MISS_LIFE).clamp(0.0, 1.0) as f32;
+                    sprite(
+                        &mut waves,
+                        e.pos.extend(-0.03),
+                        Vec2::splat(self.settings.note_size * (1.1 + age * 0.5)),
+                        0.0,
+                        fade(MISS_GLOW, 0.4 * (1.0 - age).powi(2)),
+                    );
+                }
             }
         }
         for e in &self.run.effects {
             let age = ((now - e.born - 0.05) / BREAK_LIFE).clamp(0.0, 1.0) as f32;
-            if e.score.is_some() && now - e.born > 0.05 && age < 1.0 {
+            if e.score.is_some() && hit_timing(e.late).1 >= 1.0 && now - e.born > 0.05 && age < 1.0
+            {
                 sprite(
                     &mut waves,
                     e.pos.extend(-0.03),
                     Vec2::splat(0.5 + age * 1.5),
                     0.0,
                     fade(
-                        lerp_color(self.note_color(e.note), prism(note_hue(e.note) + 0.18), 0.2),
+                        lerp_color(hit_color(e), prism(note_hue(e.note) + 0.18), 0.2),
                         0.3 * (1.0 - age).powi(2),
                     ),
                 );
@@ -1061,19 +1098,25 @@ impl Game {
                     if a >= 1.0 {
                         continue;
                     }
-                    for k in 0..8 {
+                    let (gold, burst) = hit_timing(e.late);
+                    let shards = (8.0 * burst).round() as usize;
+                    for k in 0..shards {
                         let (r1, r2, r3) = (
                             hash(e.note, k * 3),
                             hash(e.note, k * 3 + 1),
                             hash(e.note, k * 3 + 2),
                         );
-                        let angle = (k as f32 + r1 * 0.6) / 8.0 * TAU;
+                        let angle = (k as f32 + r1 * 0.6) / shards as f32 * TAU;
                         let dir = Vec2::from_angle(angle);
                         let size = (0.07 + r3 * 0.05) * (1.0 - a * 0.5);
                         let c = lerp_color(
-                            self.note_color(e.note),
-                            prism(note_hue(e.note) + k as f32 * 0.03),
-                            0.22,
+                            lerp_color(
+                                self.note_color(e.note),
+                                prism(note_hue(e.note) + k as f32 * 0.03),
+                                0.22,
+                            ),
+                            PERFECT_GLOW,
+                            gold,
                         );
                         for (lag, w) in [(0.0, 1.0), (0.02, 0.6), (0.045, 0.3)] {
                             let tl = (t - lag).max(0.0);
@@ -1090,15 +1133,34 @@ impl Game {
                     }
                 }
                 None => {
-                    let a = t / POPUP_LIFE as f32;
+                    let a = t / MISS_LIFE as f32;
                     if a >= 1.0 {
                         continue;
                     }
-                    let size = 0.128;
-                    let c = fade(tint_to(MISS, 0.8), 0.55 * (1.0 - a));
-                    let p = vec3(e.x, -1.4, 0.0);
-                    for rot in [TAU / 8.0, -TAU / 8.0] {
-                        sprite(&mut b, p, vec2(size * 1.3, size * 0.14), rot, c);
+                    let s = self.settings.note_size / 2.0;
+                    let (arm, thick) = (s * 0.75, s * 0.16);
+                    let c = fade(tint_to(MISS, 0.85), 0.9 * (1.0 - a).powi(2));
+                    for (k, corner) in [
+                        vec2(-1.0, -1.0),
+                        vec2(1.0, -1.0),
+                        vec2(1.0, 1.0),
+                        vec2(-1.0, 1.0),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let r = hash(e.note, 40 + k);
+                        let spin = corner.x * corner.y * (1.5 + 2.5 * r) * t;
+                        let turn = Vec2::from_angle(spin);
+                        let at = e.pos + corner * (s * 0.92 + (0.25 + 0.35 * r) * t)
+                            - vec2(0.0, 2.8 * t * t);
+                        let z = -0.6 * t;
+                        for (offset, size, rot) in [
+                            (vec2(-corner.x * arm / 2.0, 0.0), vec2(arm, thick), spin),
+                            (vec2(0.0, -corner.y * arm / 2.0), vec2(thick, arm), spin),
+                        ] {
+                            sprite(&mut b, (at + turn.rotate(offset)).extend(z), size, rot, c);
+                        }
                     }
                 }
             }

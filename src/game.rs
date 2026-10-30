@@ -147,6 +147,8 @@ pub struct Effect {
     pub born: f64,
     pub note: usize,
     pub score: Option<u32>,
+    /// Seconds after the note's time that it was hit.
+    pub late: f32,
 }
 
 #[derive(Clone)]
@@ -656,7 +658,7 @@ impl Game {
         self.run.last_hit = Some(i);
         self.run.hud.hits_opacity = 1.0;
         self.music.play_sfx(Sfx::Hit);
-        self.effect(i, Some(score));
+        self.effect(i, Some(score), late as f32);
     }
 
     fn miss(&mut self, i: usize) {
@@ -669,14 +671,14 @@ impl Game {
         self.run.health_step = (self.run.health_step * 1.2).min(100.0);
         self.run.hud.misses_opacity = 1.0;
         self.music.play_sfx(Sfx::Miss);
-        self.effect(i, None);
+        self.effect(i, None, 0.0);
         if self.run.health <= 0.0 && !self.settings.no_fail {
             self.run.failed = true;
             self.finish();
         }
     }
 
-    fn effect(&mut self, i: usize, score: Option<u32>) {
+    fn effect(&mut self, i: usize, score: Option<u32>, late: f32) {
         let n = self.map.notes[i];
         self.run.effects.push(Effect {
             x: n.x,
@@ -684,6 +686,7 @@ impl Game {
             born: self.now(),
             note: i,
             score,
+            late,
         });
     }
 
