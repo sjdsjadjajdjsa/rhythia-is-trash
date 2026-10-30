@@ -1259,6 +1259,15 @@ impl Game {
             WHITE,
             Align::Center,
         );
+        if !self.tag.is_empty() {
+            text.world(
+                &self.tag.to_uppercase(),
+                vec3(0.0, 9.1, -10.0),
+                0.42,
+                fade(WHITE, 0.55),
+                Align::Center,
+            );
+        }
         for e in &run.effects {
             let Some(score) = e.score else { continue };
             if crate::look::active().calm {

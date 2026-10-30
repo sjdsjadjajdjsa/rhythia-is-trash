@@ -4,6 +4,7 @@ mod audio;
 mod calibrate;
 mod chart;
 mod demo;
+mod difficulty;
 mod game;
 mod import;
 mod look;
@@ -92,6 +93,15 @@ fn request_meta(paths: &[PathBuf]) {
                 .insert(path, (seen, meta));
         }
     });
+}
+
+fn demo_meta() -> Meta {
+    static DEMO: std::sync::OnceLock<Meta> = std::sync::OnceLock::new();
+    DEMO.get_or_init(|| Meta {
+        title: String::new(),
+        ..demo::build().map.meta()
+    })
+    .clone()
 }
 
 fn meta_of(path: &Path) -> Option<Meta> {
@@ -343,15 +353,20 @@ impl Entry {
             }
         };
         let decode_ms = ms(started) - parse_ms;
-        let music = Music::new(
+        let mut map = map;
+        map.notes = difficulty::notes(&map, settings.difficulty);
+        let mut music = Music::new(
             track,
             settings.music_volume,
             settings.sfx_volume,
             settings.audio_buffer as u32,
         );
+        music.set_rate(difficulty::speed(settings.speed));
         let mut game = Game::new(map, music, palette(), settings.clone());
         game.key = self.label();
-        game.best = scores.best(&game.key);
+        game.tag = difficulty::tag(settings.difficulty, settings.speed);
+        game.score_key = difficulty::score_key(&game.key, &game.tag);
+        game.best = scores.best(&game.score_key);
         game.load_ms = [parse_ms, decode_ms, ms(started) - parse_ms - decode_ms];
         let clip = game.map.video.as_ref().filter(|_| settings.song_video);
         wallpaper::set_song_video(clip);
@@ -607,6 +622,8 @@ enum Pick {
     Quit,
     Play(Entry),
     Settings,
+    /// Steps of difficulty and of song speed.
+    Tune(i32, i32),
 }
 
 struct Select {
@@ -723,6 +740,18 @@ impl Select {
         if is_key_pressed(KeyCode::Up) {
             self.selected = (self.selected + n - 1) % n;
         }
+        let step = |less: &[KeyCode], more: &[KeyCode]| {
+            i32::from(more.iter().any(|k| is_key_pressed(*k)))
+                - i32::from(less.iter().any(|k| is_key_pressed(*k)))
+        };
+        let level = step(&[KeyCode::Left], &[KeyCode::Right]);
+        let speed = step(
+            &[KeyCode::Minus, KeyCode::KpSubtract],
+            &[KeyCode::Equal, KeyCode::KpAdd],
+        );
+        if level != 0 || speed != 0 {
+            return Some(Pick::Tune(level, speed));
+        }
         let (_, wheel) = mouse_wheel();
         if wheel != 0.0 {
             self.selected =
@@ -820,6 +849,17 @@ impl Select {
             right_aligned(14.0, 0.7).bold(true),
         );
         text.draw(&count, vec2(w - 48.0, 98.0), right_aligned(13.0, 0.45));
+        let level = settings.difficulty.min(difficulty::NAMES.len() - 1);
+        let tag = difficulty::tag(settings.difficulty, settings.speed);
+        text.draw(
+            &format!(
+                "{}   {}x",
+                difficulty::NAMES[level].to_uppercase(),
+                difficulty::speed(settings.speed)
+            ),
+            vec2(w - 48.0, 128.0),
+            right_aligned(14.0, if tag.is_empty() { 0.55 } else { 0.9 }).bold(true),
+        );
         let bottom = screen_height() - 86.0;
         let y = self.top() + self.highlight * ROW_H - self.scroll;
         let sy = y.max(self.top());
@@ -849,7 +889,7 @@ impl Select {
             );
             let meta = match e {
                 Entry::File(p) => meta_of(p),
-                Entry::Demo => None,
+                Entry::Demo => Some(demo_meta()),
             };
             let name = meta
                 .as_ref()
@@ -857,7 +897,16 @@ impl Select {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| e.label());
             if let Some(meta) = &meta {
-                let mut detail = format!("{} notes   {}", meta.notes, clock(meta.length));
+                let as_mapped = level > difficulty::NORMAL
+                    && meta.notes[level] == meta.notes[difficulty::NORMAL]
+                    && meta.stars[level] == meta.stars[difficulty::NORMAL];
+                let mut detail = format!(
+                    "{:.1} stars{}   {} notes   {}",
+                    difficulty::stars_at(meta.stars[level], settings.speed),
+                    if as_mapped { " (as mapped)" } else { "" },
+                    meta.notes[level],
+                    clock(meta.length / difficulty::speed(settings.speed))
+                );
                 if !meta.mappers.is_empty() {
                     detail = format!("{detail}   {}", meta.mappers);
                 }
@@ -877,7 +926,9 @@ impl Select {
                 vec2(104.0 + if on { 4.0 } else { 0.0 }, center),
                 Style::new(20.0, color).bold(on).middle(),
             );
-            if let Some(Best { accuracy, .. }) = scores.best(&e.label()) {
+            if let Some(Best { accuracy, .. }) =
+                scores.best(&difficulty::score_key(&e.label(), &tag))
+            {
                 text.draw(
                     &format!("{accuracy:.2}%  {}", game::grade_for(accuracy)),
                     vec2(w - 100.0, center),
@@ -899,7 +950,7 @@ impl Select {
             }
         }
         let footer = format!(
-            "Enter play   Tab settings   Del remove   Esc quit   F2 glow {}   F3 space {}",
+            "Enter play   Left/Right difficulty   -/+ speed   Tab settings   Del remove   Esc quit   F2 glow {}   F3 space {}",
             if fx.enabled { "ON" } else { "OFF" },
             settings.space.name()
         );
@@ -1149,7 +1200,7 @@ async fn main() {
                 g.recorded = true;
                 if !g.run.failed {
                     g.new_best = scores.record(
-                        &g.key,
+                        &g.score_key,
                         Best {
                             score: g.run.score,
                             accuracy: g.run.accuracy(),
@@ -1160,7 +1211,7 @@ async fn main() {
                         scores.save();
                     }
                 }
-                g.best = scores.best(&g.key);
+                g.best = scores.best(&g.score_key);
             }
             let update_ms = started.elapsed().as_secs_f32() * 1000.0;
             perf.update(update_ms);
@@ -1251,6 +1302,14 @@ async fn main() {
             }
             match select.update() {
                 Some(Pick::Quit) => break,
+                Some(Pick::Tune(level, speed)) => {
+                    let max_level = difficulty::LEVELS.len() as i32 - 1;
+                    let max_speed = difficulty::SPEEDS.len() as i32 - 1;
+                    settings.difficulty =
+                        (settings.difficulty as i32 + level).clamp(0, max_level) as usize;
+                    settings.speed = (settings.speed as i32 + speed).clamp(0, max_speed) as usize;
+                    settings.save();
+                }
                 Some(Pick::Settings) => {
                     let entry = select.entries[select.selected].clone();
                     let mut screen = SettingsScreen::new();

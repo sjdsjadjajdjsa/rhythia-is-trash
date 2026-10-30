@@ -52,6 +52,8 @@ enum Field {
     VideoBlur,
     VideoDim,
     ShowFps,
+    Difficulty,
+    Speed,
 }
 
 /// Choices of the list rows, as saved in settings.json (index = the field's value).
@@ -74,6 +76,8 @@ fn choices(field: Field) -> Option<&'static [&'static str]> {
         Field::PreviewFps => Some(&PREVIEW_FPS),
         Field::VideoQuality => Some(&VIDEO_QUALITY),
         Field::VideoBlur => Some(&VIDEO_BLUR),
+        Field::Difficulty => Some(&crate::difficulty::LEVELS),
+        Field::Speed => Some(&crate::difficulty::SPEEDS),
         _ => None,
     }
 }
@@ -105,7 +109,23 @@ const fn row(
     }
 }
 
-const ROWS: [Row; 35] = [
+const ROWS: [Row; 37] = [
+    row(
+        "difficulty",
+        "Difficulty (Left/Right in song list)",
+        Field::Difficulty,
+        0.0,
+        3.0,
+        1.0,
+    ),
+    row(
+        "speed",
+        "Song speed (-/+ in song list)",
+        Field::Speed,
+        0.0,
+        6.0,
+        1.0,
+    ),
     row(
         "look",
         "Look",
@@ -348,6 +368,8 @@ pub struct Settings {
     pub song_preview: bool,
     /// Index into `GAME_FPS`.
     pub game_fps: usize,
+    pub difficulty: usize,
+    pub speed: usize,
     /// Index into `MENU_FPS`.
     pub menu_fps: usize,
     /// Index into `VIDEO_FPS`.
@@ -393,6 +415,8 @@ impl Default for Settings {
             song_video: true,
             song_preview: true,
             game_fps: GAME_VSYNC,
+            difficulty: crate::difficulty::NORMAL,
+            speed: crate::difficulty::ONE_X,
             menu_fps: MENU_DEFAULT,
             video_fps: 1,
             preview_fps: 1,
@@ -644,6 +668,8 @@ impl Settings {
             Field::SongPreview => f32::from(u8::from(self.song_preview)),
             Field::ShowFps => f32::from(u8::from(self.show_fps)),
             Field::GameFps => self.game_fps as f32,
+            Field::Difficulty => self.difficulty as f32,
+            Field::Speed => self.speed as f32,
             Field::MenuFps => self.menu_fps as f32,
             Field::VideoFps => self.video_fps as f32,
             Field::PreviewFps => self.preview_fps as f32,
@@ -689,6 +715,8 @@ impl Settings {
             Field::SongPreview => self.song_preview = v >= 0.5,
             Field::ShowFps => self.show_fps = v >= 0.5,
             Field::GameFps => self.game_fps = v.round() as usize,
+            Field::Difficulty => self.difficulty = v.round() as usize,
+            Field::Speed => self.speed = v.round() as usize,
             Field::MenuFps => self.menu_fps = v.round() as usize,
             Field::VideoFps => self.video_fps = v.round() as usize,
             Field::PreviewFps => self.preview_fps = v.round() as usize,
@@ -800,6 +828,10 @@ impl Settings {
                 )
             }
             Field::VideoBlur => VIDEO_BLUR[self.video_blur.min(VIDEO_BLUR.len() - 1)].to_string(),
+            Field::Difficulty => crate::difficulty::NAMES
+                [self.difficulty.min(crate::difficulty::NAMES.len() - 1)]
+            .to_string(),
+            Field::Speed => format!("{}x", crate::difficulty::speed(self.speed)),
             Field::VideoDim => format!("{:.0}%", self.video_dim * 100.0),
             Field::AudioBuffer if self.audio_buffer < 1.0 => "auto".to_string(),
             Field::AudioBuffer => format!(
@@ -847,6 +879,8 @@ fn is_choice(field: Field) -> bool {
             | Field::PreviewFps
             | Field::VideoQuality
             | Field::VideoBlur
+            | Field::Difficulty
+            | Field::Speed
     )
 }
 
@@ -873,6 +907,8 @@ const TABS: [TabRows; 4] = [
     },
     TabRows {
         main: &[
+            Field::Difficulty,
+            Field::Speed,
             Field::Sensitivity,
             Field::ApproachRate,
             Field::ApproachDistance,

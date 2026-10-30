@@ -26,7 +26,8 @@ pub struct Note {
 pub struct Meta {
     pub title: String,
     pub mappers: String,
-    pub notes: usize,
+    pub notes: [usize; 4],
+    pub stars: [f32; 4],
     pub length: f64,
 }
 
@@ -36,6 +37,9 @@ pub struct Map {
     pub notes: Vec<Note>,
     pub audio: Option<Vec<u8>>,
     pub video: Option<crate::video::Clip>,
+    /// Songs charted from their audio keep every detected onset, so each difficulty can
+    /// be picked from them.
+    pub auto: Option<crate::chart::Song>,
 }
 
 impl Map {
@@ -57,6 +61,7 @@ impl Map {
             notes,
             audio,
             video: None,
+            auto: None,
         }
     }
 
@@ -70,10 +75,12 @@ impl Map {
     }
 
     pub fn meta(&self) -> Meta {
+        let levels: Vec<Vec<Note>> = (0..4).map(|l| crate::difficulty::notes(self, l)).collect();
         Meta {
             title: self.title.clone(),
             mappers: self.mappers.clone(),
-            notes: self.notes.len(),
+            notes: std::array::from_fn(|l| levels[l].len()),
+            stars: std::array::from_fn(|l| crate::difficulty::stars(&levels[l])),
             length: self.end_time(),
         }
     }
@@ -198,12 +205,15 @@ fn ms(v: u32) -> f64 {
 fn song(path: &Path) -> Result<Map, String> {
     let bytes = read(path)?;
     let data = crate::audio::decode(bytes.clone())?;
-    let notes = crate::chart::generate(&data);
+    let song = crate::chart::analyze(&data);
+    let notes = crate::difficulty::from_song(&song, crate::difficulty::NORMAL);
     let video = crate::video::is_video(path).then(|| crate::video::Clip {
         source: crate::video::Source::File(path.to_path_buf()),
         offset: 0.0,
     });
-    Ok(Map::new(stem(path), AUTO_MAPPER, notes, Some(bytes)).with_video(video))
+    let mut map = Map::new(stem(path), AUTO_MAPPER, notes, Some(bytes)).with_video(video);
+    map.auto = Some(song);
+    Ok(map)
 }
 
 fn txt(path: &Path) -> Result<Map, String> {

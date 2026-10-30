@@ -532,7 +532,7 @@ fn test_chart_onsets_hostile_sample_values() {
                     assert!(o.strength.is_finite());
                 }
                 // Also verify layout handles onsets generated from square wave
-                let notes = chart::layout(&onsets, 42);
+                let notes = chart::layout(&onsets, 42, &chart::NORMAL_SHAPE);
                 for n in &notes {
                     assert!(n.time.is_finite());
                     assert!((-2.0..=2.0).contains(&n.x));
@@ -547,15 +547,20 @@ fn test_chart_onsets_hostile_sample_values() {
 #[test]
 fn test_chart_layout_hostile_inputs() {
     // Empty onsets
-    let res_empty = catch_unwind(AssertUnwindSafe(|| chart::layout(&[], 123)));
+    let res_empty = catch_unwind(AssertUnwindSafe(|| {
+        chart::layout(&[], 123, &chart::NORMAL_SHAPE)
+    }));
     assert!(res_empty.is_ok());
 
     // Single onset
     let single = [Onset {
         time: 1.0,
         strength: 0.5,
+        contrast: 2.0,
     }];
-    let res_single = catch_unwind(AssertUnwindSafe(|| chart::layout(&single, 123)));
+    let res_single = catch_unwind(AssertUnwindSafe(|| {
+        chart::layout(&single, 123, &chart::NORMAL_SHAPE)
+    }));
     match res_single {
         Ok(notes) => {
             assert_eq!(notes.len(), 1);
@@ -568,28 +573,20 @@ fn test_chart_layout_hostile_inputs() {
 
     // Hostile onsets: identical times, negative times, NaN/Inf strength
     let hostile_onsets = [
-        Onset {
-            time: 0.0,
-            strength: 0.0,
-        },
-        Onset {
-            time: 0.0,
-            strength: 1.0,
-        },
-        Onset {
-            time: -10.0,
-            strength: 0.5,
-        },
-        Onset {
-            time: 10.0,
-            strength: f32::NAN,
-        },
-        Onset {
-            time: 20.0,
-            strength: f32::INFINITY,
-        },
-    ];
-    let res_hostile = catch_unwind(AssertUnwindSafe(|| chart::layout(&hostile_onsets, 999)));
+        (0.0, 0.0),
+        (0.0, 1.0),
+        (-10.0, 0.5),
+        (10.0, f32::NAN),
+        (20.0, f32::INFINITY),
+    ]
+    .map(|(time, strength)| Onset {
+        time,
+        strength,
+        contrast: strength,
+    });
+    let res_hostile = catch_unwind(AssertUnwindSafe(|| {
+        chart::layout(&hostile_onsets, 999, &chart::NORMAL_SHAPE)
+    }));
     match res_hostile {
         Ok(notes) => {
             for n in &notes {
@@ -599,6 +596,20 @@ fn test_chart_layout_hostile_inputs() {
             }
         }
         Err(_) => panic!("chart::layout panicked on hostile onsets"),
+    }
+    let song = chart::Song {
+        onsets: hostile_onsets.to_vec(),
+        seed: 1,
+    };
+    for level in 0..4 {
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let notes = crate::difficulty::from_song(&song, level);
+            crate::difficulty::stars(&notes)
+        }));
+        assert!(
+            res.is_ok_and(|s| s.is_finite()),
+            "difficulty panicked at level {level}"
+        );
     }
 }
 

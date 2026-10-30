@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, io::Cursor};
 
 use kira::{
-    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Frame, Tween,
+    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Frame, PlaybackRate, Tween,
     sound::{
         PlaybackPosition, PlaybackState,
         static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings},
@@ -159,6 +159,7 @@ pub struct Music {
     periods: VecDeque<f64>,
     jitter_sq: f64,
     jitter_n: u32,
+    rate: f64,
 }
 
 impl Music {
@@ -194,7 +195,17 @@ impl Music {
             periods: VecDeque::new(),
             jitter_sq: 0.0,
             jitter_n: 0,
+            rate: 1.0,
         }
+    }
+
+    /// Plays the song `rate` times as fast (and higher); the clock stays in song seconds.
+    pub fn set_rate(&mut self, rate: f64) {
+        self.rate = rate;
+    }
+
+    pub fn rate(&self) -> f64 {
+        self.rate
     }
 
     pub fn time(&self) -> f64 {
@@ -296,6 +307,7 @@ impl Music {
         if self.paused {
             return;
         }
+        let dt = dt * self.rate;
         self.local += dt;
         let before = self.time;
         self.time += dt;
@@ -303,7 +315,10 @@ impl Music {
             && self.time >= 0.0
             && let (Some(m), Some(t)) = (&mut self.manager, &self.track)
         {
-            match m.play(t.start_position(PlaybackPosition::Seconds(self.time))) {
+            match m.play(
+                t.start_position(PlaybackPosition::Seconds(self.time))
+                    .playback_rate(PlaybackRate(self.rate)),
+            ) {
                 Ok(h) => {
                     self.handle = Some(h);
                     self.offset = self.time - self.local;

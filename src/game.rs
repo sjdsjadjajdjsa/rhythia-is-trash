@@ -178,6 +178,9 @@ pub struct Game {
     pub sensitivity: f32,
     pub offset: f64,
     pub key: String,
+    /// Difficulty and speed of this run ("Hard 1.25x"), empty for normal at 1x.
+    pub tag: String,
+    pub score_key: String,
     pub best: Option<Best>,
     pub new_best: bool,
     pub recorded: bool,
@@ -298,6 +301,8 @@ impl Game {
             sensitivity: settings.sensitivity,
             offset: f64::from(settings.offset_ms) / 1000.0,
             key: String::new(),
+            tag: String::new(),
+            score_key: String::new(),
             best: None,
             new_best: false,
             recorded: false,
@@ -360,7 +365,7 @@ impl Game {
     }
 
     pub fn now(&self) -> f64 {
-        self.music.time() - self.offset
+        self.music.time() - self.offset * self.music.rate()
     }
 
     pub fn length(&self) -> f64 {
