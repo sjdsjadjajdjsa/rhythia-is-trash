@@ -4,8 +4,8 @@ use macroquad::prelude::*;
 
 use crate::{
     game::{
-        BREAK_LIFE, CURSOR_SIZE, Effect, Game, HIT_WINDOW, NoteState, POPUP_LIFE, Phase,
-        TRAIL_TIME, lerp_color, note_hue, prism,
+        BREAK_LIFE, CURSOR_SIZE, Effect, Game, HIT_WINDOW, MAX_MULTIPLIER, NoteState, POPUP_LIFE,
+        Phase, TRAIL_TIME, lerp_color, note_hue, prism,
     },
     postfx::PostFx,
     settings::Settings,
@@ -48,6 +48,7 @@ const HIT_FLASH_LIFE: f32 = 0.09;
 const PERFECT_GLOW: Color = Color::new(1.0, 0.93, 0.72, 1.0);
 const MISS_GLOW: Color = Color::new(1.0, 0.25, 0.35, 1.0);
 const MISS_LIFE: f64 = 0.45;
+const MAX_MULT_COLOR: Color = Color::new(1.0, 140.0 / 255.0, 0.0, 1.0);
 const PERFECT_LATE: f32 = 0.018;
 const GOOD_LATE: f32 = 0.036;
 const BATCH_QUADS: usize = 800;
@@ -1009,6 +1010,33 @@ impl Game {
                 fade(color, 0.22 * pulse * pulse),
             );
         }
+        let burst = self.run.hud.combo_burst;
+        let lost = self.run.hud.combo_lost;
+        if burst > 0.0 || lost > 0.0 {
+            let mut ring = Batch::new(&skin.wave);
+            if burst > 0.0 {
+                let hue = note_hue(self.run.last_hit.unwrap_or(0));
+                for (k, delay) in [(0.0, 0.0), (0.18, 0.12)] {
+                    let b = (burst + delay - 0.12).clamp(0.0, 1.0);
+                    sprite(
+                        &mut ring,
+                        vec3(0.0, 0.0, -0.06),
+                        Vec2::splat(2.0 + (1.0 - b) * 8.0),
+                        0.0,
+                        fade(lerp_color(prism(hue + k), PERFECT_GLOW, 0.3), 0.4 * b * b),
+                    );
+                }
+            }
+            if lost > 0.0 {
+                sprite(
+                    &mut ring,
+                    vec3(0.0, 0.0, -0.06),
+                    Vec2::splat(3.0 + lost * 5.0),
+                    0.0,
+                    fade(MISS_GLOW, 0.3 * lost * lost),
+                );
+            }
+        }
         let hit_color = |e: &Effect| {
             let (gold, _) = hit_timing(e.late);
             lerp_color(self.note_color(e.note), PERFECT_GLOW, gold)
@@ -1297,12 +1325,23 @@ impl Game {
             WHITE,
             Align::Center,
         );
+        let calm = crate::look::active().calm;
+        let burst = if calm { 0.0 } else { run.hud.combo_burst };
         if run.combo > 0 {
             text.world(
                 &run.combo.to_string(),
                 vec3(0.0, 3.5, -10.0),
+                2.24 * (1.0 + 0.25 * burst * burst),
+                fade(WHITE, 0.14 + 0.45 * burst * burst),
+                Align::Center,
+            );
+        } else if run.hud.combo_lost > 0.0 && !calm {
+            let lost = run.hud.combo_lost;
+            text.world(
+                &run.hud.lost_combo.to_string(),
+                vec3(0.0, 3.5 - 0.8 * (1.0 - lost), -10.0),
                 2.24,
-                fade(WHITE, 0.14),
+                fade(tint_to(MISS, 0.9), 0.45 * lost * lost),
                 Align::Center,
             );
         }
@@ -1337,13 +1376,19 @@ impl Game {
             }
             let a = ((now - e.born) / POPUP_LIFE) as f32;
             if a < 1.0 {
-                let rise = 1.0 - (1.0 - a).powi(5);
-                let p = vec3(e.x, -1.4 + 0.25 * rise, 0.0);
+                let rise = 1.0 - (1.0 - a).powi(4);
+                let pop = 1.0 + 0.5 * (1.0 - (a * 6.0).min(1.0)).powi(2);
+                let p = vec3(e.pos.x, e.pos.y + 0.42 + 0.22 * rise, 0.05);
+                let heat = (e.multiplier.saturating_sub(1) as f32 / (MAX_MULTIPLIER - 1) as f32)
+                    .clamp(0.0, 1.0);
                 text.world(
-                    &score.to_string(),
+                    &format!("+{score}"),
                     p,
-                    0.16,
-                    fade(WHITE, 0.47 * (1.0 - a)),
+                    0.17 * pop,
+                    fade(
+                        lerp_color(WHITE, MAX_MULT_COLOR, heat),
+                        0.75 * (1.0 - a * a),
+                    ),
                     Align::Center,
                 );
             }

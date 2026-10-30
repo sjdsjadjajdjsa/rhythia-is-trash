@@ -142,6 +142,20 @@ pub fn has_sibling_map(path: &Path, others: &[PathBuf]) -> bool {
         .any(|p| p != path && is_map(&p) && key(&p) == stem)
 }
 
+/// Audio the built-in decoder reads; every other format goes through ffmpeg.
+const NATIVE_AUDIO: &[&str] = &[
+    "mp3", "ogg", "oga", "wav", "wave", "flac", "m4a", "aac", "mp4", "m4b", "m4v", "aiff", "aif",
+    "aifc", "caf", "mka", "mkv",
+];
+
+pub fn needs_ffmpeg(path: &Path) -> bool {
+    is_audio(path)
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| !NATIVE_AUDIO.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 pub fn is_audio(path: &Path) -> bool {
     path.is_file()
         && path

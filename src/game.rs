@@ -16,10 +16,12 @@ pub const HITBOX_PAD: f32 = 0.07;
 pub const GRID_SIZE: f32 = 3.0;
 pub const CURSOR_SIZE: f32 = 0.2625;
 pub const BOUNDS: f32 = GRID_SIZE / 2.0 - CURSOR_SIZE / 2.0;
-pub const POPUP_LIFE: f64 = 0.25;
+pub const POPUP_LIFE: f64 = 0.5;
 pub const BREAK_LIFE: f64 = 0.5;
 pub const TRAIL_TIME: f64 = 0.05;
 pub const MAX_MULTIPLIER: u32 = 8;
+const COMBO_MILESTONE: u32 = 50;
+const COMBO_WORTH_KEEPING: u32 = 20;
 const LEAD_IN: f64 = 2.0;
 const RETRY_RUN_UP: f64 = 0.5;
 const OUTRO: f64 = 1.5;
@@ -142,13 +144,13 @@ pub enum Action {
 
 #[derive(Clone)]
 pub struct Effect {
-    pub x: f32,
     pub pos: Vec2,
     pub born: f64,
     pub note: usize,
     pub score: Option<u32>,
     /// Seconds after the note's time that it was hit.
     pub late: f32,
+    pub multiplier: u32,
 }
 
 #[derive(Clone)]
@@ -162,6 +164,11 @@ pub struct Hud {
     pub score_shown: f32,
     pub mult_pulse: f32,
     pub last_multiplier: u32,
+    /// 1 when a combo milestone is reached, fading to 0.
+    pub combo_burst: f32,
+    /// 1 when a combo worth keeping breaks, fading to 0; `lost_combo` is what it was.
+    pub combo_lost: f32,
+    pub lost_combo: u32,
 }
 
 pub struct Game {
@@ -259,6 +266,9 @@ impl Run {
                 score_shown: 0.0,
                 mult_pulse: 0.0,
                 last_multiplier: 1,
+                combo_burst: 0.0,
+                combo_lost: 0.0,
+                lost_combo: 0,
             },
         }
     }
@@ -640,6 +650,9 @@ impl Game {
         self.run.hits += 1;
         self.run.combo += 1;
         self.run.max_combo = self.run.max_combo.max(self.run.combo);
+        if self.run.combo.is_multiple_of(COMBO_MILESTONE) {
+            self.run.hud.combo_burst = 1.0;
+        }
         self.run.score += score as u64;
         self.run.multiplier_progress += 1;
         if self.run.multiplier_progress == self.run.multiplier_increment
@@ -664,6 +677,10 @@ impl Game {
     fn miss(&mut self, i: usize) {
         self.run.states[i] = NoteState::Missed;
         self.run.misses += 1;
+        if self.run.combo >= COMBO_WORTH_KEEPING {
+            self.run.hud.combo_lost = 1.0;
+            self.run.hud.lost_combo = self.run.combo;
+        }
         self.run.combo = 0;
         self.run.multiplier_progress = 0;
         self.run.multiplier = (self.run.multiplier.saturating_sub(1)).max(1);
@@ -681,12 +698,12 @@ impl Game {
     fn effect(&mut self, i: usize, score: Option<u32>, late: f32) {
         let n = self.map.notes[i];
         self.run.effects.push(Effect {
-            x: n.x,
             pos: vec2(n.x, n.y),
             born: self.now(),
             note: i,
             score,
             late,
+            multiplier: self.run.multiplier,
         });
     }
 
@@ -714,6 +731,8 @@ impl Game {
         }
         hud.last_multiplier = run.multiplier;
         hud.mult_pulse = (hud.mult_pulse - dt * 3.0).max(0.0);
+        hud.combo_burst = (hud.combo_burst - dt * 1.6).max(0.0);
+        hud.combo_lost = (hud.combo_lost - dt * 1.2).max(0.0);
         if let Some(i) = run.last_hit {
             let c = self.palette[i % self.palette.len()];
             hud.space_color = lerp_color(hud.space_color, c, (dt * 8.0).min(1.0));

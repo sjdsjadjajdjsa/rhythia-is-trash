@@ -16,13 +16,21 @@ const WINDOW: f64 = 3.0;
 const MAX_SLEW: f64 = 0.0005;
 const PERIODS: usize = 128;
 const SFX_VOLUME_DB: f32 = -6.0;
+const NO_FFMPEG: &str = "ffmpeg not available";
+pub const NEEDS_FFMPEG: &str =
+    "this audio format needs ffmpeg: install it (ffmpeg.org) or put ffmpeg next to the game";
 
 pub fn decode(bytes: Vec<u8>) -> Result<StaticSoundData, String> {
     let shared: std::sync::Arc<[u8]> = bytes.into();
     match StaticSoundData::from_cursor(Cursor::new(shared.clone())) {
         Ok(data) => Ok(data),
-        Err(first) => via_ffmpeg(&shared)
-            .map_err(|e| format!("audio: {first} (and ffmpeg could not read it either: {e})")),
+        Err(first) => via_ffmpeg(&shared).map_err(|e| {
+            if e.starts_with(NO_FFMPEG) {
+                NEEDS_FFMPEG.to_string()
+            } else {
+                format!("audio: {first} (and ffmpeg could not read it either: {e})")
+            }
+        }),
     }
 }
 
@@ -49,7 +57,7 @@ fn via_ffmpeg(bytes: &[u8]) -> Result<StaticSoundData, String> {
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("ffmpeg not available: {e}"))?;
+            .map_err(|e| format!("{NO_FFMPEG}: {e}"))?;
         let started = std::time::Instant::now();
         let status = loop {
             match child.try_wait().map_err(|e| e.to_string())? {

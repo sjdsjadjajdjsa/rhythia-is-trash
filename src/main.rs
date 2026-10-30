@@ -919,6 +919,22 @@ impl Select {
                     }
                     .middle(),
                 );
+            } else if let Entry::File(p) = e
+                && map::needs_ffmpeg(p)
+                && video::available() == Some(false)
+            {
+                text.draw(
+                    "needs ffmpeg (ffmpeg.org)",
+                    vec2(w - 200.0, center),
+                    Style {
+                        align: render::Align::Right,
+                        ..Style::new(
+                            13.0,
+                            Color::new(1.0, 0.45, 0.5, if on { 0.9 } else { 0.5 } * intro),
+                        )
+                    }
+                    .middle(),
+                );
             }
             let label = text.fit(&name, 20.0, w - 560.0);
             text.draw(
