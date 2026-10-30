@@ -44,7 +44,6 @@ const GRADE_B: Color = Color::new(143.0 / 255.0, 184.0 / 255.0, 1.0, 1.0);
 const PROGRESS_BG: Color = Color::new(40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0);
 const HITS_ICON: Color = Color::new(160.0 / 255.0, 1.0, 160.0 / 255.0, 1.0);
 const MISS: Color = Color::new(1.0, 160.0 / 255.0, 160.0 / 255.0, 1.0);
-const MISS_ICON: Color = Color::new(1.0, 0.0, 0.0, 1.0);
 const HIT_FLASH_LIFE: f32 = 0.09;
 const BATCH_QUADS: usize = 800;
 
@@ -775,25 +774,6 @@ impl Game {
                 }
             }
         }
-        let flash = |opacity: f32| ((opacity - 0.62) / 0.38).clamp(0.0, 1.0);
-        let right = panel(1.0);
-        let row = 0.625 * PANEL_PX.y;
-        let icon = |x0: f32, x1: f32| (panel_px(x0, row + 7.0), panel_px(x1, row - 12.0));
-        let pad = 0.1;
-        let (lo, hi) = icon(125.0 - 21.0, 125.0 - 2.0);
-        right.rect(
-            &mut glow,
-            lo - Vec2::splat(pad),
-            hi + Vec2::splat(pad),
-            fade(HITS_ICON, 0.32 * flash(run.hud.hits_opacity)),
-        );
-        let (lo, hi) = icon(125.0 + 2.0, 125.0 + 21.0);
-        right.rect(
-            &mut glow,
-            lo - Vec2::splat(pad),
-            hi + Vec2::splat(pad),
-            fade(MISS_ICON, 0.32 * flash(run.hud.misses_opacity)),
-        );
         drop(glow);
         gl_use_material(&skin.blend);
         let mut b = Batch::new(&skin.white);
@@ -818,22 +798,19 @@ impl Game {
                 left.line(&mut b, p0 - ext * 0.15, p1 + ext * 0.15, width, color);
             }
         }
-        let (lo, hi) = icon(125.0 - 21.0, 125.0 - 2.0);
-        right.rect(
+        let right = panel(1.0);
+        let px = PANEL_H / PANEL_PX.y;
+        let row = 0.6175 * PANEL_PX.y;
+        right.line(
             &mut b,
-            vec2(lo.x, lo.y),
-            vec2(hi.x, hi.y),
-            fade(HITS_ICON, run.hud.hits_opacity),
+            panel_px(125.0, row - 9.0),
+            panel_px(125.0, row + 9.0),
+            1.5 * px,
+            fade(WHITE, 0.22),
         );
-        let (lo, hi) = icon(125.0 + 2.0, 125.0 + 21.0);
-        let m = fade(MISS_ICON, run.hud.misses_opacity);
-        let t = (hi.x - lo.x) * 0.2;
-        right.line(&mut b, lo, hi, t, m);
-        right.line(&mut b, vec2(lo.x, hi.y), vec2(hi.x, lo.y), t, m);
         let ly = 0.65 * PANEL_PX.y;
         let (l0, l1) = (panel_px(16.0, ly), panel_px(234.0, ly));
-        let lh = 2.0 / PANEL_PX.y * PANEL_H;
-        let mid = (l0 + l1) / 2.0;
+        let lh = 2.0 * px;
         let corners = |a: Vec2, z: Vec2| {
             [
                 vec2(a.x, a.y - lh / 2.0),
@@ -842,17 +819,22 @@ impl Game {
                 vec2(a.x, a.y + lh / 2.0),
             ]
         };
-        for (a, z, ca, cz) in [(l0, mid, 0.0, 0.5), (mid, l1, 0.5, 0.0)] {
+        let judged = run.judged();
+        let (mid, hit_c, miss_c) = if judged == 0 {
+            ((l0 + l1) / 2.0, fade(WHITE, 0.5), fade(WHITE, 0.5))
+        } else {
+            (
+                l0.lerp(l1, run.hits as f32 / judged as f32),
+                fade(tint_to(HITS_ICON, 0.6), 0.35 + 0.5 * run.hud.hits_opacity),
+                fade(tint_to(MISS, 0.8), 0.35 + 0.5 * run.hud.misses_opacity),
+            )
+        };
+        for (a, z, ca, cz) in [
+            (l0, mid, fade(hit_c, 0.0), hit_c),
+            (mid, l1, miss_c, fade(miss_c, 0.0)),
+        ] {
             let c = corners(a, z).map(|q| right.at(q));
-            b.quad(
-                c,
-                [
-                    fade(WHITE, ca),
-                    fade(WHITE, cz),
-                    fade(WHITE, cz),
-                    fade(WHITE, ca),
-                ],
-            );
+            b.quad(c, [ca, cz, cz, ca]);
         }
         let alpha = if run.failed { 0.5 } else { 1.0 };
         let health = tilted_bar(-6.3, -1.0);
@@ -1113,10 +1095,10 @@ impl Game {
                         continue;
                     }
                     let size = 0.128;
-                    let c = fade(MISS_ICON, 100.0 / 255.0 * (1.0 - a));
+                    let c = fade(tint_to(MISS, 0.8), 0.55 * (1.0 - a));
                     let p = vec3(e.x, -1.4, 0.0);
                     for rot in [TAU / 8.0, -TAU / 8.0] {
-                        sprite(&mut b, p, vec2(size * 1.3, size * 0.25), rot, c);
+                        sprite(&mut b, p, vec2(size * 1.3, size * 0.14), rot, c);
                     }
                 }
             }
@@ -1231,17 +1213,17 @@ impl Game {
         );
         text.world("NOTES", at(right, 125.0, 0.79), label, dim, Align::Center);
         let hits = fade(tint_to(HITS_ICON, 0.35), run.hud.hits_opacity);
-        let misses = fade(tint_to(MISS, 0.35), run.hud.misses_opacity);
+        let misses = fade(tint_to(MISS, 0.6), run.hud.misses_opacity);
         text.world(
             &run.hits.to_string(),
-            at(right, 100.0, 0.6175),
+            at(right, 113.0, 0.6175),
             small,
             hits,
             Align::Right,
         );
         text.world(
             &run.misses.to_string(),
-            at(right, 150.0, 0.6175),
+            at(right, 137.0, 0.6175),
             small,
             misses,
             Align::Left,
