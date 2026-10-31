@@ -38,6 +38,7 @@ enum Field {
     Fullscreen,
     ShortQueue,
     NoFail,
+    Ghost,
     Bypass,
     NoteCore,
     LevelPulse,
@@ -91,6 +92,26 @@ struct Row {
     step: f32,
 }
 
+const NICKNAME_MAX: usize = 24;
+
+/// A nickname as saved and shown: printable characters only, trimmed, at most 24 of them.
+fn clean_nickname(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(NICKNAME_MAX)
+        .collect();
+    kept.trim().to_string()
+}
+
+/// "Player 4821", for anyone who has not picked a nickname.
+fn random_nickname() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("Player {}", 1000 + nanos % 9000)
+}
+
 const fn row(
     key: &'static str,
     label: &'static str,
@@ -109,7 +130,7 @@ const fn row(
     }
 }
 
-const ROWS: [Row; 37] = [
+const ROWS: [Row; 38] = [
     row(
         "difficulty",
         "Difficulty (Left/Right in song list)",
@@ -238,6 +259,14 @@ const ROWS: [Row; 37] = [
         1.0,
     ),
     row("no_fail", "No fail", Field::NoFail, 0.0, 1.0, 1.0),
+    row(
+        "ghost",
+        "Race ghost (best run)",
+        Field::Ghost,
+        0.0,
+        1.0,
+        1.0,
+    ),
     row("note_core", "Note style", Field::NoteCore, 0.0, 1.0, 1.0),
     row(
         "level_pulse",
@@ -357,6 +386,7 @@ pub struct Settings {
     pub fullscreen: bool,
     pub short_gl_queue: bool,
     pub no_fail: bool,
+    pub ghost: bool,
     pub note_core: bool,
     pub level_pulse: bool,
     pub beat_glow: bool,
@@ -382,6 +412,8 @@ pub struct Settings {
     pub video_blur: usize,
     pub video_dim: f32,
     pub show_fps: bool,
+    /// The name saved in shared ghost files; never taken from the computer.
+    pub nickname: String,
 }
 
 impl Default for Settings {
@@ -405,6 +437,7 @@ impl Default for Settings {
             fullscreen: false,
             short_gl_queue: false,
             no_fail: false,
+            ghost: true,
             note_core: false,
             level_pulse: true,
             beat_glow: false,
@@ -424,19 +457,24 @@ impl Default for Settings {
             video_blur: 0,
             video_dim: 0.55,
             show_fps: false,
+            nickname: String::new(),
         }
     }
 }
 
 impl Settings {
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(FILE) else {
-            return Self::default();
+        let mut s = match fs::read_to_string(FILE) {
+            Ok(text) => Self::parse(&text).unwrap_or_else(|| {
+                eprintln!("{FILE}: not valid settings, using defaults");
+                Self::default()
+            }),
+            Err(_) => Self::default(),
         };
-        Self::parse(&text).unwrap_or_else(|| {
-            eprintln!("{FILE}: not valid settings, using defaults");
-            Self::default()
-        })
+        if s.nickname.is_empty() {
+            s.nickname = random_nickname();
+        }
+        s
     }
 
     fn parse(text: &str) -> Option<Self> {
@@ -453,6 +491,7 @@ impl Settings {
                 Field::Fullscreen => s.fullscreen = v.as_bool().unwrap_or(s.fullscreen),
                 Field::ShortQueue => s.short_gl_queue = v.as_bool().unwrap_or(s.short_gl_queue),
                 Field::NoFail => s.no_fail = v.as_bool().unwrap_or(s.no_fail),
+                Field::Ghost => s.ghost = v.as_bool().unwrap_or(s.ghost),
                 Field::NoteCore => s.note_core = v.as_bool().unwrap_or(s.note_core),
                 Field::LevelPulse => s.level_pulse = v.as_bool().unwrap_or(s.level_pulse),
                 Field::BeatGlow => s.beat_glow = v.as_bool().unwrap_or(s.beat_glow),
@@ -502,11 +541,16 @@ impl Settings {
             .and_then(Value::as_f64)
             .unwrap_or(0.55) as f32;
         s.wallpaper_dim = s.wallpaper_dim.clamp(0.0, 0.85);
+        s.nickname = map
+            .get("nickname")
+            .and_then(Value::as_str)
+            .map(clean_nickname)
+            .unwrap_or_default();
         Some(s)
     }
 
     pub fn save(&self) {
-        if let Err(e) = crate::store::write_atomic(FILE, &self.to_text()) {
+        if let Err(e) = crate::store::write_atomic(FILE, self.to_text()) {
             eprintln!("{FILE}: {e}");
         }
     }
@@ -521,6 +565,7 @@ impl Settings {
                 Field::Fullscreen => Value::Bool(self.fullscreen),
                 Field::ShortQueue => Value::Bool(self.short_gl_queue),
                 Field::NoFail => Value::Bool(self.no_fail),
+                Field::Ghost => Value::Bool(self.ghost),
                 Field::NoteCore => Value::Bool(self.note_core),
                 Field::LevelPulse => Value::Bool(self.level_pulse),
                 Field::BeatGlow => Value::Bool(self.beat_glow),
@@ -546,6 +591,7 @@ impl Settings {
             "wallpaper_dim".into(),
             Value::from((f64::from(self.wallpaper_dim.clamp(0.0, 0.85)) * 1000.0).round() / 1000.0),
         );
+        map.insert("nickname".into(), Value::String(self.nickname.clone()));
         serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_default()
     }
 
@@ -660,6 +706,7 @@ impl Settings {
             Field::Fullscreen => f32::from(u8::from(self.fullscreen)),
             Field::ShortQueue => f32::from(u8::from(self.short_gl_queue)),
             Field::NoFail => f32::from(u8::from(self.no_fail)),
+            Field::Ghost => f32::from(u8::from(self.ghost)),
             Field::NoteCore => f32::from(u8::from(self.note_core)),
             Field::LevelPulse => f32::from(u8::from(self.level_pulse)),
             Field::BeatGlow => f32::from(u8::from(self.beat_glow)),
@@ -707,6 +754,7 @@ impl Settings {
             Field::Fullscreen => self.fullscreen = v >= 0.5,
             Field::ShortQueue => self.short_gl_queue = v >= 0.5,
             Field::NoFail => self.no_fail = v >= 0.5,
+            Field::Ghost => self.ghost = v >= 0.5,
             Field::NoteCore => self.note_core = v >= 0.5,
             Field::LevelPulse => self.level_pulse = v >= 0.5,
             Field::BeatGlow => self.beat_glow = v >= 0.5,
@@ -741,6 +789,7 @@ impl Settings {
             Field::Fullscreen => self.fullscreen = !self.fullscreen,
             Field::ShortQueue => self.short_gl_queue = !self.short_gl_queue,
             Field::NoFail => self.no_fail = !self.no_fail,
+            Field::Ghost => self.ghost = !self.ghost,
             Field::NoteCore => self.note_core = !self.note_core,
             Field::LevelPulse => self.level_pulse = !self.level_pulse,
             Field::BeatGlow => self.beat_glow = !self.beat_glow,
@@ -794,6 +843,7 @@ impl Settings {
             Field::Fullscreen => (if self.fullscreen { "on" } else { "off" }).to_string(),
             Field::ShortQueue => (if self.short_gl_queue { "on" } else { "off" }).to_string(),
             Field::NoFail => (if self.no_fail { "on" } else { "off" }).to_string(),
+            Field::Ghost => (if self.ghost { "on" } else { "off" }).to_string(),
             Field::NoteCore => (if self.note_core { "filled" } else { "outline" }).to_string(),
             Field::LevelPulse => (if self.level_pulse { "on" } else { "off" }).to_string(),
             Field::BeatGlow => (if self.beat_glow { "on" } else { "off" }).to_string(),
@@ -866,6 +916,7 @@ fn is_choice(field: Field) -> bool {
             | Field::Fullscreen
             | Field::ShortQueue
             | Field::NoFail
+            | Field::Ghost
             | Field::NoteCore
             | Field::LevelPulse
             | Field::BeatGlow
@@ -915,7 +966,7 @@ const TABS: [TabRows; 4] = [
             Field::NoteSize,
             Field::CursorSize,
         ],
-        more: &[Field::Parallax, Field::Fov, Field::NoFail],
+        more: &[Field::Parallax, Field::Fov, Field::NoFail, Field::Ghost],
     },
     TabRows {
         main: &[
@@ -949,12 +1000,16 @@ enum Entry {
     Field(Field),
     Calibrate,
     BatterySaver,
+    Nickname,
     More,
 }
 
 fn entries(tab: usize, more: bool) -> Vec<Entry> {
     let t = &TABS[tab];
     let mut out: Vec<Entry> = t.main.iter().map(|f| Entry::Field(*f)).collect();
+    if tab == 1 {
+        out.push(Entry::Nickname);
+    }
     if tab == 2 {
         out.push(Entry::Calibrate);
     }
@@ -1075,6 +1130,8 @@ pub struct SettingsScreen {
     /// while the song video setting is on (`video_on`).
     video: Option<(crate::video::Clip, f64)>,
     video_on: bool,
+    /// The nickname being typed, while its row is being edited.
+    naming: Option<String>,
 }
 
 impl Drop for SettingsScreen {
@@ -1116,6 +1173,7 @@ impl SettingsScreen {
             drawn_before: false,
             video: None,
             video_on: false,
+            naming: None,
         }
     }
 
@@ -1136,6 +1194,36 @@ impl SettingsScreen {
         self.more[self.tab] = !self.more[self.tab];
     }
 
+    fn start_naming(&mut self, s: &Settings) {
+        while get_char_pressed().is_some() {}
+        self.naming = Some(s.nickname.clone());
+    }
+
+    /// Typing a nickname: Enter keeps it, Esc cancels; other keys are text meanwhile.
+    fn type_name(&mut self, s: &mut Settings) {
+        let Some(typed) = self.naming.as_mut() else {
+            return;
+        };
+        while let Some(c) = get_char_pressed() {
+            if !c.is_control() && typed.chars().count() < NICKNAME_MAX {
+                typed.push(c);
+            }
+        }
+        if is_key_pressed(KeyCode::Backspace) {
+            typed.pop();
+        }
+        if is_key_pressed(KeyCode::Escape) {
+            self.naming = None;
+        } else if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+            let name = clean_nickname(&self.naming.take().unwrap_or_default());
+            s.nickname = if name.is_empty() {
+                random_nickname()
+            } else {
+                name
+            };
+        }
+    }
+
     pub fn update(&mut self, s: &mut Settings) -> Exit {
         if self.snapshot.is_none() {
             self.snapshot = Some(s.clone());
@@ -1143,6 +1231,10 @@ impl SettingsScreen {
         }
         if self.preview.is_none() {
             self.preview = Some(Preview::demo(s));
+        }
+        if self.naming.is_some() {
+            self.type_name(s);
+            return Exit::Stay;
         }
         self.before = is_key_down(KeyCode::B);
         if is_key_pressed(KeyCode::R)
@@ -1204,6 +1296,7 @@ impl SettingsScreen {
             match list[r] {
                 Entry::Calibrate => return Exit::Calibrate,
                 Entry::BatterySaver => s.battery_saver(),
+                Entry::Nickname => self.start_naming(s),
                 Entry::More => {
                     self.toggle_more();
                     return Exit::Stay;
@@ -1271,6 +1364,7 @@ impl SettingsScreen {
                 }
                 Entry::Calibrate => return Exit::Calibrate,
                 Entry::BatterySaver => s.battery_saver(),
+                Entry::Nickname => self.start_naming(s),
                 Entry::Field(_) => {}
             }
         }
@@ -1330,6 +1424,13 @@ impl SettingsScreen {
             let (label, value) = match e {
                 Entry::Field(f) => (row_of(*f).label, s.show(*f)),
                 Entry::Calibrate => ("Calibrate...", "Enter".to_string()),
+                Entry::Nickname => (
+                    "Nickname (on ghosts you share)",
+                    match &self.naming {
+                        Some(typed) => format!("{typed}_"),
+                        None => s.nickname.clone(),
+                    },
+                ),
                 Entry::BatterySaver => (
                     "Battery saver",
                     if s.is_battery_saver() {
@@ -1823,6 +1924,22 @@ mod tests {
         s.wallpaper = "a.png".into();
         assert!(s.differs(Field::Sensitivity) && s.differs(Field::Wallpaper));
         assert!(!s.differs(Field::Fov));
+    }
+
+    #[test]
+    fn nickname_is_saved_cleaned_and_never_empty_after_load() {
+        let s = Settings {
+            nickname: "ana".into(),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&s.to_text()).unwrap().nickname, "ana");
+        let typed = r#"{"nickname": "  a\u0007b  "}"#;
+        assert_eq!(Settings::parse(typed).unwrap().nickname, "ab");
+        let long = format!(r#"{{"nickname": "{}"}}"#, "x".repeat(40));
+        assert_eq!(Settings::parse(&long).unwrap().nickname.len(), NICKNAME_MAX);
+        assert!(Settings::parse("{}").unwrap().nickname.is_empty());
+        assert!(random_nickname().starts_with("Player "));
+        assert!(entries(1, false).contains(&Entry::Nickname));
     }
 
     #[test]

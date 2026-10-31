@@ -1224,6 +1224,15 @@ impl Game {
             gl_use_material(&skin.blend);
         }
         let mut b = Batch::new(&skin.cursor);
+        if let Some(at) = self.ghost_cursor() {
+            sprite(
+                &mut b,
+                at.extend(0.0),
+                Vec2::splat(CURSOR_SIZE * self.settings.cursor_size),
+                0.0,
+                fade(self.palette[0], 0.4),
+            );
+        }
         sprite(
             &mut b,
             run.cursor.extend(0.0),
@@ -1255,6 +1264,20 @@ impl Game {
             WHITE,
             Align::Center,
         );
+        if let Some((name, lead)) = self.ghost_lead().filter(|_| self.phase == Phase::Playing) {
+            let (sign, color) = if lead >= 0 {
+                ("+", Color::from_rgba(120, 230, 140, 255))
+            } else {
+                ("-", MISS)
+            };
+            text.world(
+                &format!("{sign}{} vs {name}", format_count(lead.unsigned_abs())),
+                at(left, 125.0, 0.43),
+                em * 0.5,
+                color,
+                Align::Center,
+            );
+        }
         let pulse = run.hud.mult_pulse;
         text.world(
             &format!("{}x", run.multiplier),
@@ -1485,6 +1508,21 @@ impl Game {
         };
         if let Some(line) = best_line {
             lines.insert(1, line);
+        }
+        if let Some((name, lead)) = self
+            .versus
+            .as_ref()
+            .filter(|_| self.phase == Phase::Finished)
+        {
+            let lead_text = format_count(lead.unsigned_abs());
+            lines.insert(
+                1,
+                match lead.signum() {
+                    1 => format!("beat {name} by {lead_text}"),
+                    0 => format!("tied with {name}"),
+                    _ => format!("{name} wins by {lead_text}"),
+                },
+            );
         }
         let age = (get_time() - self.phase_since) as f32;
         let reveal = (1.0 - (-age * 10.0).exp()).clamp(0.0, 1.0);

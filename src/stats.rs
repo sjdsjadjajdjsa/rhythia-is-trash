@@ -33,7 +33,7 @@ pub fn summarize(lates_ms: &[f32]) -> Option<Summary> {
     })
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Replay {
     samples: Vec<(f32, Vec2)>,
 }
@@ -86,6 +86,21 @@ impl Replay {
         let (a_t, a) = self.samples[i - 1];
         let (b_t, b) = self.samples[i];
         a.lerp(b, ((t - f64::from(a_t)) / f64::from(b_t - a_t)) as f32)
+    }
+
+    pub fn samples(&self) -> &[(f32, Vec2)] {
+        &self.samples
+    }
+
+    /// Rebuilds a replay from saved samples, keeping only what `record` would have kept.
+    pub fn from_samples(samples: &[(f32, Vec2)]) -> Self {
+        let mut r = Self::new();
+        for &(t, p) in samples {
+            if p.is_finite() {
+                r.record(f64::from(t), p);
+            }
+        }
+        r
     }
 
     pub fn span(&self) -> Option<(f64, f64)> {

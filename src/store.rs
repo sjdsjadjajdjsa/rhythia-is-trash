@@ -6,7 +6,7 @@ use std::{
 
 static LAUNCH_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-pub fn write_atomic(path: &str, contents: &str) -> io::Result<()> {
+pub fn write_atomic(path: &str, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let tmp = format!("{path}.tmp");
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, Path::new(path)).inspect_err(|_| {

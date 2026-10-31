@@ -4,6 +4,7 @@ use macroquad::prelude::*;
 
 use crate::{
     audio::{Music, Sfx},
+    ghost::Ghost,
     map::Map,
     perf::Stats,
     render::Space,
@@ -182,6 +183,10 @@ pub struct Game {
     pub settings: Settings,
     pub run: Run,
     pub watching: Option<crate::stats::Replay>,
+    /// The run raced on this song, when the ghost setting is on.
+    pub ghost: Option<Ghost>,
+    /// How the finished run ended against the ghost: its name and the score difference.
+    pub versus: Option<(String, i64)>,
     saved: Option<Run>,
     saved_new_best: bool,
     pub sensitivity: f32,
@@ -228,6 +233,8 @@ pub struct Run {
     pub sweep_hits: u32,
     pub lates_ms: Vec<f32>,
     pub replay: crate::stats::Replay,
+    /// (song time, total score) after every hit, saved with the ghost.
+    pub score_track: Vec<(f32, u64)>,
     pub started_at: f64,
 }
 
@@ -255,6 +262,7 @@ impl Run {
             sweep_hits: 0,
             lates_ms: Vec::new(),
             replay: crate::stats::Replay::new(),
+            score_track: Vec::new(),
             started_at: 0.0,
             hud: Hud {
                 multiplier_progress: 0.0,
@@ -308,6 +316,8 @@ impl Game {
             stats: Stats::default(),
             run,
             watching: None,
+            ghost: None,
+            versus: None,
             saved: None,
             saved_new_best: false,
             sensitivity: settings.sensitivity,
@@ -363,6 +373,52 @@ impl Game {
             self.music.set_paused(true);
             self.grab(false);
         }
+    }
+
+    fn racing(&self) -> Option<&Ghost> {
+        self.ghost
+            .as_ref()
+            .filter(|_| self.settings.ghost && !self.autoplay)
+    }
+
+    /// Where the ghost's cursor is now, while a run is on screen.
+    pub fn ghost_cursor(&self) -> Option<Vec2> {
+        let ghost = self.racing().filter(|_| self.phase != Phase::Ready)?;
+        Some(
+            ghost
+                .path
+                .sample_at(self.now())
+                .clamp(Vec2::splat(-BOUNDS), Vec2::splat(BOUNDS)),
+        )
+    }
+
+    /// Score ahead of (positive) or behind the ghost at this point of the song.
+    pub fn ghost_lead(&self) -> Option<(String, i64)> {
+        let ghost = self.racing()?;
+        Some((
+            ghost.name.clone(),
+            self.run.score as i64 - ghost.score_at(self.now()) as i64,
+        ))
+    }
+
+    /// This run as a ghost, for a cleared run that was really played.
+    pub fn as_ghost(&self) -> Option<Ghost> {
+        if self.phase != Phase::Finished
+            || self.run.failed
+            || self.autoplay
+            || self.watching.is_some()
+            || self.run.replay.is_empty()
+        {
+            return None;
+        }
+        Some(Ghost {
+            key: self.score_key.clone(),
+            name: self.settings.nickname.clone(),
+            score: self.run.score,
+            accuracy: self.run.accuracy(),
+            path: self.run.replay.clone(),
+            scores: self.run.score_track.clone(),
+        })
     }
 
     pub fn approach_time(&self) -> f64 {
@@ -529,6 +585,7 @@ impl Game {
     fn start(&mut self, retry: bool) {
         self.watching = None;
         self.saved = None;
+        self.versus = None;
         let first = self.map.notes.first().map_or(0.0, |n| n.time);
         self.start_at(start_time(first, self.approach_time(), retry), true);
     }
@@ -557,6 +614,10 @@ impl Game {
         }
         self.phase = Phase::Finished;
         self.phase_since = get_time();
+        self.versus = self
+            .racing()
+            .filter(|_| !self.run.failed)
+            .map(|g| (g.name.clone(), self.run.score as i64 - g.score as i64));
         self.music.set_paused(true);
         self.music.play_sfx(if self.run.failed {
             Sfx::Fail
@@ -654,6 +715,9 @@ impl Game {
             self.run.hud.combo_burst = 1.0;
         }
         self.run.score += score as u64;
+        self.run
+            .score_track
+            .push((self.now() as f32, self.run.score));
         self.run.multiplier_progress += 1;
         if self.run.multiplier_progress == self.run.multiplier_increment
             && self.run.multiplier < MAX_MULTIPLIER

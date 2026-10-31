@@ -63,7 +63,7 @@ impl VideoOffsets {
     }
 
     pub fn save(&self) {
-        if let Err(e) = crate::store::write_atomic(FILE, &render(&self.ms)) {
+        if let Err(e) = crate::store::write_atomic(FILE, render(&self.ms)) {
             eprintln!("{FILE}: {e}");
         }
     }

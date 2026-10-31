@@ -6,6 +6,7 @@ mod chart;
 mod demo;
 mod difficulty;
 mod game;
+mod ghost;
 mod import;
 mod look;
 mod map;
@@ -367,6 +368,7 @@ impl Entry {
         game.tag = difficulty::tag(settings.difficulty, settings.speed);
         game.score_key = difficulty::score_key(&game.key, &game.tag);
         game.best = scores.best(&game.score_key);
+        game.ghost = ghost::best(&game.score_key);
         game.load_ms = [parse_ms, decode_ms, ms(started) - parse_ms - decode_ms];
         let clip = game.map.video.as_ref().filter(|_| settings.song_video);
         wallpaper::set_song_video(clip);
@@ -1225,6 +1227,10 @@ async fn main() {
                     );
                     if g.new_best {
                         scores.save();
+                        if let Some(run) = g.as_ghost() {
+                            run.save();
+                            g.ghost = ghost::best(&g.score_key);
+                        }
                     }
                 }
                 g.best = scores.best(&g.score_key);
@@ -1284,6 +1290,17 @@ async fn main() {
                 .into_iter()
                 .filter_map(|f| f.path)
                 .collect();
+            let (ghosts, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+                dropped.into_iter().partition(|p| ghost::is_ghost(p));
+            for path in ghosts {
+                match ghost::import(&path) {
+                    Ok(line) => {
+                        select.notice = Some(line);
+                        select.error = None;
+                    }
+                    Err(e) => select.error = Some(e),
+                }
+            }
             let as_wallpaper = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
             let (walls, rest): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| {
                 wallpaper::is_image(p) || (as_wallpaper && wallpaper::is_wallpaper(p))

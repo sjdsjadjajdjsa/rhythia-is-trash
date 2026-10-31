@@ -82,7 +82,7 @@ impl Scores {
     }
 
     pub fn save(&self) {
-        if let Err(e) = crate::store::write_atomic(FILE, &render(&self.bests)) {
+        if let Err(e) = crate::store::write_atomic(FILE, render(&self.bests)) {
             eprintln!("{FILE}: {e}");
         }
     }
